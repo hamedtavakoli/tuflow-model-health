@@ -26,6 +26,17 @@ class Issue:
     line: Optional[int] = None  # line number in file (if applicable)
     details: Dict[str, Any] = field(default_factory=dict)
 
+@dataclass
+class DiscoveryResult:
+    """Stage 0: summary of available scenarios, events and wildcard vars."""
+    tcf_path: Path
+    control_files: Set[Path]                # all .tcf/.tgc/.tbc/.ecf/.tef/other includes
+    scenarios: Set[str]                     # discovered scenario names
+    events: Set[str]                        # discovered event names
+    wildcard_variables: Set[str]            # ~Var~ tokens in any directive/value
+    uses_event_file: bool = False
+    event_file_paths: Set[Path] = field(default_factory=set)
+
 
 @dataclass
 class PreRunSettings:
@@ -87,6 +98,140 @@ DIRECTIVE_RE = re.compile(
     re.VERBOSE,
 )
 
+def _scan_control_file_for_discovery(
+    path: Path,
+    scenarios: set[str],
+    events: set[str],
+    wildcard_vars: set[str],
+    event_file_paths: set[Path],
+) -> None:
+    """
+    Skim a control file (TCF/TGC/TBC/ECF/etc.) for:
+      - Scenario names
+      - Event names
+      - Event File paths
+      - Wildcard variable names (~Var~)
+    """
+    base_dir = path.parent
+
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        # Don't blow up discovery if a file can't be read
+        return
+
+    for line in text.splitlines():
+        no_comment = _strip_inline_comment(line)
+        stripped = no_comment.strip()
+        if not stripped:
+            continue
+        if COMMENT_RE.match(stripped):
+            continue
+
+        # Scenario logic
+        m = SCENARIO_IF_RE.match(stripped)
+        if m:
+            vals = _split_pipe_values(m.group("vals"))
+            scenarios.update(vals)
+
+        m = MODEL_SCENARIOS_RE.match(stripped)
+        if m:
+            vals = _split_pipe_values(m.group("vals"))
+            scenarios.update(vals)
+
+        # Event logic
+        m = EVENT_IF_RE.match(stripped)
+        if m:
+            vals = _split_pipe_values(m.group("vals"))
+            events.update(vals)
+
+        m = MODEL_EVENTS_RE.match(stripped)
+        if m:
+            vals = _split_pipe_values(m.group("vals"))
+            events.update(vals)
+
+        # Event File
+        m = EVENT_FILE_RE.match(stripped)
+        if m:
+            raw = m.group("path").strip().strip('"').strip("'")
+            if raw:
+                ef_path = (base_dir / raw).resolve()
+                event_file_paths.add(ef_path)
+
+        # Wildcards
+        for wm in WILDCARD_RE.finditer(stripped):
+            wildcard_vars.add(wm.group("var"))
+
+
+def _scan_tef_for_events(tef_path: Path, events: set[str]) -> None:
+    """Scan a TEF (event file) for Define Event blocks."""
+    try:
+        text = tef_path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return
+
+    for line in text.splitlines():
+        no_comment = _strip_inline_comment(line)
+        stripped = no_comment.strip()
+        if not stripped or COMMENT_RE.match(stripped):
+            continue
+
+        m = DEFINE_EVENT_RE.match(stripped)
+        if m:
+            name = m.group("name").strip()
+            if name:
+                events.add(name)
+
+# ---------- Stage 0 discovery regexes ----------
+
+SCENARIO_IF_RE = re.compile(
+    r"^\s*(If|Else If)\s+Scenario\s*==\s*(?P<vals>.+?)\s*$",
+    re.IGNORECASE,
+)
+
+MODEL_SCENARIOS_RE = re.compile(
+    r"^\s*Model\s+Scenarios\s*==\s*(?P<vals>.+?)\s*$",
+    re.IGNORECASE,
+)
+
+EVENT_IF_RE = re.compile(
+    r"^\s*(If|Else If)\s+Event\s*==\s*(?P<vals>.+?)\s*$",
+    re.IGNORECASE,
+)
+
+MODEL_EVENTS_RE = re.compile(
+    r"^\s*Model\s+Events\s*==\s*(?P<vals>.+?)\s*$",
+    re.IGNORECASE,
+)
+
+EVENT_FILE_RE = re.compile(
+    r"^\s*Event\s+File\s*==\s*(?P<path>.+?)\s*$",
+    re.IGNORECASE,
+)
+
+DEFINE_EVENT_RE = re.compile(
+    r"^\s*Define\s+Event\s*==\s*(?P<name>.+?)\s*$",
+    re.IGNORECASE,
+)
+
+WILDCARD_RE = re.compile(r"~(?P<var>[A-Za-z0-9_]+)~")
+
+INLINE_COMMENT_SPLIT_RE = re.compile(r"(!|//|#)")
+
+
+def _strip_inline_comment(line: str) -> str:
+    """
+    Remove inline comments starting with ! or // or #.
+    Example:
+      'Event File == Event_File.tef  ! Reference' -> 'Event File == Event_File.tef'
+    """
+    parts = INLINE_COMMENT_SPLIT_RE.split(line, maxsplit=1)
+    return parts[0]
+
+
+def _split_pipe_values(vals: str) -> list[str]:
+    """Split 'EXG | DEV | CC2070' into a list of clean strings."""
+    return [v.strip() for v in vals.split("|") if v.strip()]
 
 def parse_control_file(path: Path) -> ControlFile:
     """Parse a TUFLOW control file (TCF/TGC/ECF) into directives."""
@@ -476,6 +621,50 @@ def check_time_settings(model: ModelConfig) -> List[Issue]:
 
     return issues
 
+def discover_run_options(tcf: str | Path) -> DiscoveryResult:
+    """
+    Stage 0: Discover available Scenarios, Events and wildcard variables
+    from all control files referenced by the main TCF.
+    """
+    tcf_path = Path(tcf).resolve()
+
+    # Reuse ModelConfig builder to follow Geometry/BC/Read File includes
+    model = build_model_config(tcf_path)
+
+    control_files: set[Path] = set(model.control_files.keys())
+    scenarios: set[str] = set()
+    events: set[str] = set()
+    wildcard_vars: set[str] = set()
+    uses_event_file = False
+    event_file_paths: set[Path] = set()
+
+    # First pass: scan all known control files (tcf/tgc/tbc/ecf/etc.)
+    for cf_path in control_files:
+        _scan_control_file_for_discovery(
+            cf_path,
+            scenarios=scenarios,
+            events=events,
+            wildcard_vars=wildcard_vars,
+            event_file_paths=event_file_paths,
+        )
+
+    # Second pass: scan any TEF files we discovered for Define Event
+    for ef in event_file_paths:
+        uses_event_file = True
+        if ef.exists():
+            _scan_tef_for_events(ef, events)
+        control_files.add(ef)
+
+    return DiscoveryResult(
+        tcf_path=tcf_path,
+        control_files=control_files,
+        scenarios=scenarios,
+        events=events,
+        wildcard_variables=wildcard_vars,
+        uses_event_file=uses_event_file,
+        event_file_paths=event_file_paths,
+    )
+
 
 def run_pre_run_checks(
     tcf: str | Path,
@@ -532,9 +721,55 @@ if __name__ == "__main__":
     import sys
 
     if len(sys.argv) < 2:
-        print("Usage: python -m tuflow_qaqc.pre_run path/to/model.tcf")
+        print(
+            "Usage:\n"
+            "  python -m tuflow_qaqc.pre_run --discover path/to/model.tcf\n"
+            "  python -m tuflow_qaqc.pre_run path/to/model.tcf"
+        )
         raise SystemExit(1)
 
+    # Simple subcommand detection
+    if sys.argv[1] == "--discover":
+        if len(sys.argv) < 3:
+            print("Please provide a TCF path after --discover.")
+            raise SystemExit(1)
+        tcf_arg = sys.argv[2]
+        dr = discover_run_options(tcf_arg)
+
+        print(f"TCF: {dr.tcf_path}")
+        print("\nControl files:")
+        for p in sorted(dr.control_files):
+            print(f"  {p}")
+
+        if dr.scenarios:
+            print("\nScenarios found:")
+            for s in sorted(dr.scenarios):
+                print(f"  {s}")
+        else:
+            print("\nScenarios found: (none)")
+
+        if dr.events:
+            print("\nEvents found:")
+            for e in sorted(dr.events):
+                print(f"  {e}")
+        else:
+            print("\nEvents found: (none)")
+
+        if dr.wildcard_variables:
+            print("\nWildcard variables (from ~Var~ tokens):")
+            for v in sorted(dr.wildcard_variables):
+                print(f"  {v}")
+        else:
+            print("\nWildcard variables: (none)")
+
+        if dr.uses_event_file:
+            print("\nEvent files:")
+            for ef in sorted(dr.event_file_paths):
+                print(f"  {ef}")
+
+        raise SystemExit(0)
+
+    # Default: run Stage 1 static pre-run checks
     tcf_arg = sys.argv[1]
     result = run_pre_run_checks(tcf_arg)
 
