@@ -214,6 +214,26 @@ def build_model_config(tcf_path: Path) -> ModelConfig:
 
     return model
 
+# ---------- Helper utilities for checks ----------
+
+def find_directives(cf: ControlFile, key: str) -> list[ControlDirective]:
+    """Find all directives in a control file with a given keyword (case-insensitive)."""
+    key_norm = key.strip().lower()
+    return [
+        d for d in cf.directives
+        if d.keyword.strip().lower() == key_norm
+    ]
+
+
+def _parse_float(value: str) -> Optional[float]:
+    """Try to parse a float from a directive value; return None if it fails."""
+    # Take first token that looks like a number
+    token = value.strip().split()[0]
+    try:
+        return float(token)
+    except ValueError:
+        return None
+
 
 # ---------- Static checks ----------
 
@@ -310,6 +330,152 @@ def check_referenced_files_exist(model: ModelConfig) -> List[Issue]:
                 )
     return issues
 
+def check_time_settings(model: ModelConfig) -> List[Issue]:
+    """
+    Check that Start Time, End Time and Time Step are present and sensible.
+    This is a light sanity check, not a full physical consistency check.
+    """
+    issues: List[Issue] = []
+
+    tcf = model.tcf
+
+    # 1) Fetch directives from main TCF (not from included controls)
+    start_dirs = find_directives(tcf, "Start Time")
+    end_dirs = find_directives(tcf, "End Time")
+    dt_dirs = find_directives(tcf, "Time Step")
+
+    # 2) Presence checks
+    if not start_dirs:
+        issues.append(
+            Issue(
+                id="PR040_START_TIME_MISSING",
+                severity=Severity.CRITICAL,
+                category="Time",
+                message="Start Time directive is missing from the TCF.",
+                suggestion="Add a 'Start Time' directive to the TCF (e.g. 'Start Time == 0').",
+                file=tcf.path,
+            )
+        )
+    if not end_dirs:
+        issues.append(
+            Issue(
+                id="PR041_END_TIME_MISSING",
+                severity=Severity.CRITICAL,
+                category="Time",
+                message="End Time directive is missing from the TCF.",
+                suggestion="Add an 'End Time' directive to the TCF (e.g. 'End Time == 72').",
+                file=tcf.path,
+            )
+        )
+    if not dt_dirs:
+        issues.append(
+            Issue(
+                id="PR042_TIME_STEP_MISSING",
+                severity=Severity.CRITICAL,
+                category="Time",
+                message="Time Step directive is missing from the TCF.",
+                suggestion="Add a 'Time Step' directive to the TCF (e.g. 'Time Step == 1').",
+                file=tcf.path,
+            )
+        )
+
+    # If any are totally missing, don't try to parse values
+    if not start_dirs or not end_dirs or not dt_dirs:
+        return issues
+
+    # 3) Value checks (use the FIRST occurrence for now)
+    start_val = _parse_float(start_dirs[0].value)
+    end_val = _parse_float(end_dirs[0].value)
+    dt_val = _parse_float(dt_dirs[0].value)
+
+    # If parsing fails, treat as Major issues
+    if start_val is None:
+        issues.append(
+            Issue(
+                id="PR043_START_TIME_NOT_NUMERIC",
+                severity=Severity.MAJOR,
+                category="Time",
+                message=f"Could not parse Start Time as a number: '{start_dirs[0].value}'.",
+                suggestion="Ensure Start Time is specified as a numeric value (e.g. 'Start Time == 0').",
+                file=tcf.path,
+                line=start_dirs[0].line,
+            )
+        )
+    if end_val is None:
+        issues.append(
+            Issue(
+                id="PR044_END_TIME_NOT_NUMERIC",
+                severity=Severity.MAJOR,
+                category="Time",
+                message=f"Could not parse End Time as a number: '{end_dirs[0].value}'.",
+                suggestion="Ensure End Time is specified as a numeric value (e.g. 'End Time == 72').",
+                file=tcf.path,
+                line=end_dirs[0].line,
+            )
+        )
+    if dt_val is None:
+        issues.append(
+            Issue(
+                id="PR045_TIME_STEP_NOT_NUMERIC",
+                severity=Severity.MAJOR,
+                category="Time",
+                message=f"Could not parse Time Step as a number: '{dt_dirs[0].value}'.",
+                suggestion="Ensure Time Step is specified as a numeric value (e.g. 'Time Step == 1').",
+                file=tcf.path,
+                line=dt_dirs[0].line,
+            )
+        )
+
+    # If any of them are non-numeric, no more numeric checks
+    if start_val is None or end_val is None or dt_val is None:
+        return issues
+
+    # 4) Basic numeric sanity
+    if dt_val <= 0:
+        issues.append(
+            Issue(
+                id="PR046_TIME_STEP_NONPOSITIVE",
+                severity=Severity.CRITICAL,
+                category="Time",
+                message=f"Time Step is non-positive: {dt_val}.",
+                suggestion="Use a positive Time Step (e.g. 0.5, 1.0).",
+                file=tcf.path,
+                line=dt_dirs[0].line,
+            )
+        )
+
+    if end_val <= start_val:
+        issues.append(
+            Issue(
+                id="PR047_END_NOT_AFTER_START",
+                severity=Severity.MAJOR,
+                category="Time",
+                message=f"End Time ({end_val}) is not greater than Start Time ({start_val}).",
+                suggestion="Ensure End Time is greater than Start Time to define a valid simulation duration.",
+                file=tcf.path,
+                line=end_dirs[0].line,
+            )
+        )
+
+    # Optional: rough "too long" check (configurable later). For now, just warn if > 500 hrs.
+    duration = end_val - start_val
+    if duration > 500:
+        issues.append(
+            Issue(
+                id="PR048_LONG_SIM_DURATION",
+                severity=Severity.MINOR,
+                category="Time",
+                message=f"Simulation duration is very long ({duration} time units).",
+                suggestion="Confirm that this long duration is intentional. "
+                           "If using hours, consider whether a shorter simulation window would suffice.",
+                file=tcf.path,
+                line=end_dirs[0].line,
+                details={"duration": duration},
+            )
+        )
+
+    return issues
+
 
 def run_pre_run_checks(
     tcf: str | Path,
@@ -347,11 +513,14 @@ def run_pre_run_checks(
         )
         return PreRunResult(tcf_path=tcf_path, issues=all_issues, static_checks_ok=False)
 
-    # 4) Control file existence checks
+     # 4) Control file existence checks
     all_issues.extend(check_control_files_exist(model))
 
     # 5) Referenced paths (GIS / BC / tables)
     all_issues.extend(check_referenced_files_exist(model))
+
+    # 6) Time control sanity (Start/End/Time Step)
+    all_issues.extend(check_time_settings(model))
 
     static_ok = not any(i.severity == Severity.CRITICAL for i in all_issues)
     return PreRunResult(tcf_path=tcf_path, issues=all_issues, static_checks_ok=static_ok)
