@@ -3,8 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import List, Dict, Optional, Any, Set, Iterable
+from typing import List, Dict, Optional, Any, Set, Tuple
 import re
+import sys
 
 
 # ---------- Core types ----------
@@ -17,39 +18,14 @@ class Severity(str, Enum):
 
 @dataclass
 class Issue:
-    id: str                     # e.g. "PR001_TCF_MISSING"
+    id: str
     severity: Severity
-    category: str               # e.g. "Structure", "ControlFiles", "Paths"
-    message: str                # human-readable description
-    suggestion: str             # recommended fix
-    file: Optional[Path] = None # file this relates to (if any)
-    line: Optional[int] = None  # line number in file (if applicable)
+    category: str
+    message: str
+    suggestion: str
+    file: Optional[Path] = None
+    line: Optional[int] = None
     details: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class ControlNode:
-    """A node in the control file tree for Stage 0 discovery."""
-
-    path: Path
-    children: List["ControlNode"] = field(default_factory=list)
-    missing: bool = False
-
-
-@dataclass
-class DiscoveryResult:
-    """Stage 0: resolved TCF and tree of referenced control files."""
-
-    tcf_path: Path
-    control_tree: ControlNode
-    missing_control_files: List[Path] = field(default_factory=list)
-
-
-@dataclass
-class PreRunSettings:
-    """Settings for potential pre-run checks (reserved for future use)."""
-
-    tuflow_exe: Optional[Path] = None
 
 
 @dataclass
@@ -67,38 +43,32 @@ class ControlFile:
 
 
 @dataclass
-class ModelConfig:
-    """Placeholder for legacy callers; not used in the new flow."""
-
-    tcf: ControlFile
-    control_files: Dict[Path, ControlFile] = field(default_factory=dict)
-    referenced_files: Dict[str, Set[Path]] = field(default_factory=dict)
+class ControlTree:
+    root_tcf: Path
+    edges: Dict[Path, List[Path]]  # parent -> children
+    all_files: Set[Path]
+    issues: List[Issue]
 
 
 @dataclass
-class InputReference:
-    """An external input referenced by a control file."""
-
+class InputRef:
     path: Path
-    category: str  # e.g. GIS or Database
-    status: str    # OK or MISSING
-    source_file: Path
+    kind: str  # "gis" or "database" or "other"
+    from_control: Path
     line: int
-    keyword: str
+    exists: bool
 
 
 @dataclass
 class InputScanResult:
-    """Stage 1 results summarising GIS/database inputs."""
-
     tcf_path: Path
-    inputs: List[InputReference]
+    control_tree: ControlTree
+    inputs: List[InputRef]
 
 
-# ---------- Parsing utilities ----------
+# ---------- Regex & parsing helpers ----------
 
 COMMENT_RE = re.compile(r"^\s*(!|#|//)")
-
 DIRECTIVE_RE = re.compile(
     r"""
     ^\s*
@@ -110,383 +80,412 @@ DIRECTIVE_RE = re.compile(
     re.VERBOSE,
 )
 
-WILDCARD_RE = re.compile(r"~(?P<var>[A-Za-z0-9_]+)~")
-
 INLINE_COMMENT_SPLIT_RE = re.compile(r"(!|//|#)")
+WILDCARD_RE = re.compile(r"~(?P<var>[A-Za-z0-9_]+)~")
 
 
 def _strip_inline_comment(line: str) -> str:
-    """
-    Remove inline comments starting with ! or // or #.
-    Example:
-      'Event File == Event_File.tef  ! Reference' -> 'Event File == Event_File.tef'
-    """
-
+    """Remove inline comments starting with ! or // or #."""
     parts = INLINE_COMMENT_SPLIT_RE.split(line, maxsplit=1)
     return parts[0]
 
 
-def parse_control_file(path: Path) -> ControlFile:
-    """Parse a TUFLOW control file (TCF/TGC/ECF/etc.) into directives."""
+def escape_regexp(str_: str) -> str:
+    return re.escape(str_)
 
+
+def parse_control_file(path: Path) -> ControlFile:
+    """Parse a TUFLOW-style control file into directives (key == value lines)."""
     directives: List[ControlDirective] = []
 
-    try:
-        text = path.read_text(encoding="utf-8", errors="ignore")
-    except FileNotFoundError:
-        raise
-    except Exception as e:  # pragma: no cover - defensive
-        raise RuntimeError(f"Failed to read control file {path}: {e}") from e
+    text = path.read_text(encoding="utf-8", errors="ignore")
 
-    for i, line in enumerate(text.splitlines(), start=1):
-        stripped = _strip_inline_comment(line)
-        if not stripped.strip():
+    for i, raw_line in enumerate(text.splitlines(), start=1):
+        no_comment = _strip_inline_comment(raw_line)
+        line = no_comment.strip()
+        if not line:
             continue
-        if COMMENT_RE.match(stripped):
+        if COMMENT_RE.match(line):
             continue
 
-        m = DIRECTIVE_RE.match(stripped)
+        m = DIRECTIVE_RE.match(line)
         if not m:
-            # Not a standard directive; keep raw if needed later
+            # Non key==value lines (IF, DEFINE, etc.) are ignored at this stage
             continue
 
         key = m.group("key").strip()
         value = m.group("value").strip()
-        directives.append(ControlDirective(keyword=key, value=value, line=i, raw=line))
+        directives.append(
+            ControlDirective(keyword=key, value=value, line=i, raw=raw_line)
+        )
 
     return ControlFile(path=path, directives=directives)
 
 
-# ---------- Stage 0: wildcard resolution + control file tree ----------
+# ---------- Wildcard utilities ----------
 
-# Keywords that indicate other control files (case-insensitive)
-CONTROL_FILE_KEYWORDS = {
-    "geometry control",
-    "geometry control file",
-    "bc control",
-    "bc control file",
-    "estry control",
-    "1d control",
-    "2d control",
-    "quadtree control",
-    "rainfall control",
-    "rainfall control file",
-    "operations control",
-    "event file",
-    "read file",
-    "read control file",
-    "soils file",
+def find_wildcards_in_filename(path: Path) -> List[str]:
+    """Return wildcard names (without tildes) from a filename."""
+    return [m.group("var") for m in WILDCARD_RE.finditer(path.name)]
+
+
+def build_wildcard_map_from_args(
+    filename_wildcards: List[str],
+    argv: List[str],
+) -> Dict[str, str]:
+    """
+    Build a wildcard->value map from CLI args.
+    Supports args like: -e1 00100Y -e2 0060m -s1 5m -s2 CL0
+    If any required wildcard is missing, prompt the user.
+    """
+    supplied: Dict[str, str] = {}
+
+    # Very simple CLI parsing: look for '-name value' pairs
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if token.startswith("-") and len(token) > 1:
+            name = token[1:]  # e.g. "-e1" -> "e1"
+            if i + 1 < len(argv):
+                supplied[name] = argv[i + 1]
+                i += 2
+                continue
+        i += 1
+
+    # Prompt for any missing required wildcards
+    for w in filename_wildcards:
+        if w not in supplied:
+            prompt_name = f"-{w}"
+            val = input(f"Enter value for {prompt_name}: ").strip()
+            supplied[w] = val
+
+    return supplied
+
+
+def substitute_wildcards(value: str, wildcards: Dict[str, str]) -> str:
+    """Replace ~var~ tokens in a string with provided wildcard values (if available)."""
+
+    def repl(match: re.Match) -> str:
+        var = match.group("var")
+        return wildcards.get(var, match.group(0))  # leave as-is if not provided
+
+    return WILDCARD_RE.sub(repl, value)
+
+
+# ---------- Control file tree (Stage 0) ----------
+
+CONTROL_EXTS = {
+    ".tcf", ".tgc", ".tbc", ".ecf",
+    ".qcf", ".tef", ".toc", ".trfc",
+    ".adcf", ".tsoilf",
 }
 
-# Heuristics to categorise external inputs
-GIS_INPUT_HINTS = (
-    "read gis",
-    "read mi",
-    "read grid",
-    "z shape",
-    "z line",
-    "z pts",
-    "mat",
-    "code",
-    "grid",
-    "dem",
-    "raster",
-)
-
-DATABASE_INPUT_HINTS = (
-    "database",
-    "dbase",
-    "table",
-    "materials",
-    "bc table",
-    "bc database",
-    "rainfall database",
-    "hydrograph",
-)
+# Keywords that typically reference another control file
+CONTROL_KEY_HINTS = {
+    "Geometry Control",
+    "BC Control",
+    "ESTRY Control",
+    "Quadtree Control",
+    "Event File",
+    "Rainfall Control",
+    "Operations Control",
+    "Soils File",
+    "Advection Dispersion Control",
+    "Read File",  # generic include
+}
 
 
-def _extract_candidate_paths(value: str) -> List[str]:
-    """Pull simple path-like tokens from a directive value."""
-
-    tokens = re.split(r"[\s,;]+", value.strip('"'))
-    paths: List[str] = []
-    for token in tokens:
-        if "." in token and not re.fullmatch(r"[+-]?\d+(\.\d+)?", token):
-            paths.append(token.strip('"'))
-    return paths
+def is_control_file_path(p: Path) -> bool:
+    return p.suffix.lower() in CONTROL_EXTS
 
 
-def _keyword_in_set(keyword: str, options: Iterable[str]) -> bool:
-    key_norm = keyword.strip().lower()
-    return any(key_norm == opt for opt in options)
-
-
-def detect_wildcards_in_name(name: str) -> Set[str]:
-    """Return wildcard tokens (e.g. e1, s2) found in a filename."""
-
-    return {m.group("var").lower() for m in WILDCARD_RE.finditer(name)}
-
-
-def resolve_tcf_template(tcf_template: Path, wildcard_values: Dict[str, str]) -> Path:
+def _collect_control_children(
+    cf: ControlFile,
+    wildcards: Dict[str, str],
+) -> List[Path]:
     """
-    Resolve a TCF template filename by substituting ~eN~/~sN~ wildcards.
-
-    The resolved name may not exist on disk; callers should decide whether to enforce
-    presence. This keeps the template path usable without requiring a specific
-    resolved file name.
+    From a parsed control file, find all referenced control files,
+    substituting wildcards in the values.
     """
-
-    tcf_template = tcf_template.resolve()
-    required = detect_wildcards_in_name(tcf_template.name)
-    missing = {w for w in required if w not in {k.lower() for k in wildcard_values}}
-    if missing:
-        missing_list = ", ".join(sorted(missing))
-        raise ValueError(f"Missing values for wildcards: {missing_list}")
-
-    resolved_name = tcf_template.name
-    for key, val in wildcard_values.items():
-        resolved_name = resolved_name.replace(f"~{key}~", val)
-        resolved_name = resolved_name.replace(f"~{key.lower()}~", val)
-        resolved_name = resolved_name.replace(f"~{key.upper()}~", val)
-
-    return tcf_template.with_name(resolved_name)
-
-
-def _find_control_children(cf: ControlFile) -> List[Path]:
-    """Return referenced control files from a parsed control file."""
-
-    base_dir = cf.path.parent
     children: List[Path] = []
+    base_dir = cf.path.parent
+
     for d in cf.directives:
-        if _keyword_in_set(d.keyword, CONTROL_FILE_KEYWORDS):
-            for token in _extract_candidate_paths(d.value):
-                children.append((base_dir / token).resolve())
+        key = d.keyword.strip()
+        if not any(h.lower() in key.lower() for h in CONTROL_KEY_HINTS):
+            # Not a known control-file directive; skip
+            continue
+
+        # Substitute wildcards in the value (path)
+        value = substitute_wildcards(d.value, wildcards)
+
+        # Simple token split: allow for multiple filenames in one line
+        tokens = re.split(r"[\s,;]+", value.strip('"').strip("'"))
+        for tok in tokens:
+            if not tok:
+                continue
+            p = (base_dir / tok).resolve()
+            if is_control_file_path(p):
+                children.append(p)
+
     return children
 
 
-def _build_control_node(
-    path: Path,
-    missing: list[Path],
-    cache: Dict[Path, ControlNode],
-) -> ControlNode:
-    """Recursively build the control file tree starting from ``path``."""
+def build_control_tree(
+    tcf_path: Path,
+    wildcards: Dict[str, str],
+) -> ControlTree:
+    """
+    Build a tree of control files starting from the main TCF.
+    We DO NOT modify the TCF filename itself; wildcards are only used
+    when resolving referenced control-file paths.
+    """
+    edges: Dict[Path, List[Path]] = {}
+    all_files: Set[Path] = set()
+    issues: List[Issue] = []
+    visited: Set[Path] = set()
 
-    norm = path.resolve()
-    if norm in cache:
-        return cache[norm]
+    def visit(path: Path) -> None:
+        if path in visited:
+            return
+        visited.add(path)
+        all_files.add(path)
+        edges.setdefault(path, [])
 
-    if not norm.exists():
-        node = ControlNode(path=norm, missing=True)
-        cache[norm] = node
-        missing.append(norm)
-        return node
-
-    try:
-        cf = parse_control_file(norm)
-    except Exception:
-        node = ControlNode(path=norm, missing=True)
-        cache[norm] = node
-        missing.append(norm)
-        return node
-
-    node = ControlNode(path=norm)
-    cache[norm] = node
-    for child_path in _find_control_children(cf):
-        node.children.append(_build_control_node(child_path, missing, cache))
-    return node
-
-
-def build_discovery(tcf_path: Path) -> DiscoveryResult:
-    """Stage 0: resolve control file includes into a tree structure."""
-
-    missing: list[Path] = []
-    cache: Dict[Path, ControlNode] = {}
-    root = _build_control_node(tcf_path, missing=missing, cache=cache)
-    return DiscoveryResult(tcf_path=tcf_path, control_tree=root, missing_control_files=missing)
-
-
-# ---------- Stage 1: external input listing ----------
-
-
-def _categorise_input(keyword: str) -> Optional[str]:
-    k = keyword.lower()
-    if any(h in k for h in GIS_INPUT_HINTS):
-        return "GIS"
-    if any(h in k for h in DATABASE_INPUT_HINTS):
-        return "Database"
-    return None
-
-
-def _scan_inputs_in_control_file(cf: ControlFile) -> List[InputReference]:
-    """Extract GIS/database input references from a control file."""
-
-    refs: List[InputReference] = []
-    base_dir = cf.path.parent
-    for d in cf.directives:
-        if _keyword_in_set(d.keyword, CONTROL_FILE_KEYWORDS):
-            continue
-
-        category = _categorise_input(d.keyword)
-        if category is None:
-            continue
-
-        for token in _extract_candidate_paths(d.value):
-            p = (base_dir / token).resolve()
-            status = "OK" if p.exists() else "MISSING"
-            refs.append(
-                InputReference(
-                    path=p,
-                    category=category,
-                    status=status,
-                    source_file=cf.path,
-                    line=d.line,
-                    keyword=d.keyword,
+        if not path.exists():
+            issues.append(
+                Issue(
+                    id="CT001_CONTROL_FILE_MISSING",
+                    severity=Severity.CRITICAL,
+                    category="ControlFiles",
+                    message=f"Control file not found: {path}",
+                    suggestion=(
+                        "Check that the file exists and that the path is correct in the calling control file."
+                    ),
+                    file=path,
                 )
             )
+            return
 
-    return refs
+        try:
+            cf = parse_control_file(path)
+        except Exception as e:
+            issues.append(
+                Issue(
+                    id="CT002_CONTROL_FILE_READ_ERROR",
+                    severity=Severity.CRITICAL,
+                    category="ControlFiles",
+                    message=f"Error reading control file {path}: {e}",
+                    suggestion="Check file permissions and encoding.",
+                    file=path,
+                )
+            )
+            return
+
+        children = _collect_control_children(cf, wildcards)
+        edges[path] = children
+        for child in children:
+            visit(child)
+
+    visit(tcf_path)
+
+    return ControlTree(
+        root_tcf=tcf_path,
+        edges=edges,
+        all_files=all_files,
+        issues=issues,
+    )
 
 
-def _iter_control_nodes(node: ControlNode) -> Iterable[ControlNode]:
-    yield node
-    for child in node.children:
-        yield from _iter_control_nodes(child)
+# ---------- Stage 1: scan input GIS layers and databases ----------
+
+GIS_EXTS = {
+    ".shp", ".tab", ".mif", ".mid", ".gpkg", ".gdb",
+    ".tif", ".tiff", ".asc", ".flt", ".grd",
+}
+DB_EXTS = {
+    ".csv", ".txt", ".dat", ".dbf",
+}
 
 
-def scan_inputs(control_tree: ControlNode) -> InputScanResult:
-    """Stage 1: list GIS/database inputs from all control files in the tree."""
+def _categorise_input_path(p: Path, keyword: str) -> str:
+    """Roughly categorise an input file as gis/database/other."""
+    ext = p.suffix.lower()
+    if ext in GIS_EXTS:
+        return "gis"
+    if ext in DB_EXTS:
+        return "database"
+    # Prefer marking 'Database' keywords as database even without known ext
+    if "database" in keyword.lower():
+        return "database"
+    return "other"
 
-    inputs: List[InputReference] = []
-    parsed_cache: Dict[Path, ControlFile] = {}
-    for node in _iter_control_nodes(control_tree):
-        if node.missing:
+
+def _scan_inputs_in_control_file(
+    path: Path,
+    wildcards: Dict[str, str],
+) -> List[InputRef]:
+    """Scan a single control file for input file references (GIS, CSV, etc.)."""
+    inputs: List[InputRef] = []
+
+    if not path.exists():
+        return inputs
+
+    base_dir = path.parent
+    text = path.read_text(encoding="utf-8", errors="ignore")
+
+    for i, raw_line in enumerate(text.splitlines(), start=1):
+        no_comment = _strip_inline_comment(raw_line)
+        line = no_comment.strip()
+        if not line or COMMENT_RE.match(line):
             continue
-        if node.path in parsed_cache:
-            cf = parsed_cache[node.path]
-        else:
-            try:
-                cf = parse_control_file(node.path)
-            except Exception:
+
+        m = DIRECTIVE_RE.match(line)
+        if not m:
+            continue
+
+        key = m.group("key").strip()
+        val_raw = m.group("value").strip()
+
+        # Substitute wildcards in the value
+        val = substitute_wildcards(val_raw, wildcards)
+
+        # Heuristic: if the keyword strongly suggests an input file, or the
+        # value looks like a filename with an extension
+        tokens = re.split(r"[\s,;]+", val.strip('"').strip("'"))
+        for tok in tokens:
+            if not tok:
                 continue
-            parsed_cache[node.path] = cf
-        inputs.extend(_scan_inputs_in_control_file(cf))
 
-    return InputScanResult(tcf_path=control_tree.path, inputs=inputs)
+            # Only treat tokens with a dot as file-like
+            if "." not in tok:
+                continue
+
+            p = (base_dir / tok).resolve()
+            kind = _categorise_input_path(p, key)
+
+            # Only keep those that look like genuine inputs
+            if kind in {"gis", "database"}:
+                exists = p.exists()
+                inputs.append(
+                    InputRef(
+                        path=p,
+                        kind=kind,
+                        from_control=path,
+                        line=i,
+                        exists=exists,
+                    )
+                )
+
+    return inputs
 
 
-def pretty_print_control_tree(node: ControlNode, prefix: str = "") -> None:
-    """Print a simple text tree of control file references."""
-
-    marker = "[MISSING] " if node.missing else ""
-    print(f"{prefix}{marker}{node.path.name}")
-    for i, child in enumerate(node.children):
-        is_last = i == len(node.children) - 1
-        new_prefix = prefix + ("    " if is_last else "│   ")
-        connector = "└── " if is_last else "├── "
-        print(f"{prefix}{connector}", end="")
-        pretty_print_control_tree(child, prefix=new_prefix)
-
-
-def _parse_wildcard_args(args: List[str]) -> Dict[str, str]:
+def scan_all_inputs(
+    tcf_path: Path,
+    wildcards: Dict[str, str],
+) -> InputScanResult:
     """
-    Parse wildcard assignments from leftover CLI args (e.g. ``--e1 001`` or
-    ``--e1=001``).
-
-    Accepts both space-separated pairs and inline ``=`` forms so Windows users can
-    avoid multi-line quoting issues.
+    Stage 1: given a TCF and wildcard values, build the control tree,
+    then scan all control files for GIS and database inputs.
     """
+    control_tree = build_control_tree(tcf_path, wildcards)
+    seen_paths: Set[Path] = set()
+    all_inputs: List[InputRef] = []
 
-    values: Dict[str, str] = {}
-    i = 0
-    while i < len(args):
-        key = args[i]
+    for cf_path in control_tree.all_files:
+        inputs = _scan_inputs_in_control_file(cf_path, wildcards)
+        for inp in inputs:
+            # avoid duplicates: (path, from_control, line) can be unique;
+            # but here we just dedupe by path and kind
+            key = (inp.path, inp.kind)
+            if key in seen_paths:
+                continue
+            seen_paths.add(key)
+            all_inputs.append(inp)
 
-        if key.startswith("-") and "=" in key:
-            name, value = key.split("=", 1)
-            name = name.lstrip("-")
-            i += 1
-        else:
-            if not key.startswith("-"):
-                raise ValueError(f"Unexpected argument: {key}")
-            name = key.lstrip("-")
-            if i + 1 >= len(args):
-                raise ValueError(f"Missing value for wildcard {key}")
-            value = args[i + 1]
-            i += 2
-
-        if not re.fullmatch(r"[es]\d+", name, flags=re.IGNORECASE):
-            raise ValueError(f"Wildcard arguments must look like --e1/--s1, got {key}")
-
-        values[name] = value
-
-    return values
+    return InputScanResult(
+        tcf_path=tcf_path,
+        control_tree=control_tree,
+        inputs=all_inputs,
+    )
 
 
-def _print_input_summary(inputs: List[InputReference]) -> None:
-    if not inputs:
-        print("No external inputs found in control files.")
+# ---------- CLI helpers for printing ----------
+
+def _print_control_tree(tree: ControlTree) -> None:
+    """Print control file tree like a directory structure."""
+
+    def recurse(node: Path, prefix: str = "") -> None:
+        children = tree.edges.get(node, [])
+        for idx, child in enumerate(children):
+            is_last = idx == len(children) - 1
+            connector = "└── " if is_last else "├── "
+            print(f"{prefix}{connector}{child.name}")
+            next_prefix = prefix + ("    " if is_last else "│   ")
+            recurse(child, next_prefix)
+
+    print(tree.root_tcf.name)
+    recurse(tree.root_tcf)
+
+
+def _print_input_scan(result: InputScanResult) -> None:
+    print("\nInput files (GIS & Databases):")
+    if not result.inputs:
+        print("  (none found)")
         return
 
-    by_category: Dict[str, List[InputReference]] = {}
-    for ref in inputs:
-        by_category.setdefault(ref.category, []).append(ref)
-
-    for category, refs in by_category.items():
-        print(f"\n{category} Inputs:")
-        seen: Set[Path] = set()
-        for ref in refs:
-            if ref.path in seen:
-                continue
-            seen.add(ref.path)
-            status = "[OK]" if ref.status == "OK" else "[MISSING]"
-            print(f"  {status} {ref.path} (from {ref.source_file.name} line {ref.line})")
+    for inp in sorted(result.inputs, key=lambda x: (x.kind, str(x.path))):
+        status = "OK" if inp.exists else "MISSING"
+        status_tag = "[OK]     " if inp.exists else "[MISSING]"
+        print(
+            f"  {status_tag} {inp.kind:9s} {inp.path} "
+            f"(from {inp.from_control.name}, line {inp.line})"
+        )
 
 
-def main(argv: Optional[List[str]] = None) -> None:
-    """CLI entry point implementing wildcard-driven Stage 0 + Stage 1."""
+# ---------- Main entry point ----------
 
-    import argparse
+def main(argv: List[str]) -> None:
+    if not argv:
+        print(
+            "Usage:\n"
+            "  python -m tuflow_qaqc.pre_run path/to/model.tcf "
+            "[wildcard args]\n\n"
+            "Wildcard args example:\n"
+            "  -e1 00100Y -e2 0060m -e3 tp01 -s1 5m -s2 CL0\n"
+        )
+        raise SystemExit(1)
 
-    parser = argparse.ArgumentParser(
-        description=(
-            "Resolve TUFLOW TCF templates, build control file trees, and list GIS/"
-            "database inputs."
-        ),
-        allow_abbrev=False,
-    )
-    parser.add_argument(
-        "tcf_template",
-        help="Path to the TCF template filename (may contain ~eN~/~sN~ wildcards)",
-    )
-    args, unknown = parser.parse_known_args(argv)
+    tcf_str = argv[0]
+    tcf_path = Path(tcf_str).resolve()
 
-    try:
-        wildcard_values = _parse_wildcard_args(unknown)
-    except ValueError as exc:  # pragma: no cover - CLI guard
-        parser.error(str(exc))
+    # Stage 0: find required wildcards from TCF filename
+    filename_wildcards = find_wildcards_in_filename(tcf_path)
+    # Build wildcard map from CLI args + prompt for any missing
+    wildcard_map = build_wildcard_map_from_args(filename_wildcards, argv[1:])
 
-    tcf_template = Path(args.tcf_template)
+    # Stage 1: scan control files & inputs
+    result = scan_all_inputs(tcf_path, wildcard_map)
 
-    try:
-        resolved_tcf = resolve_tcf_template(tcf_template, wildcard_values)
-    except ValueError as exc:  # pragma: no cover - CLI guard
-        parser.error(str(exc))
-
-    print(f"TCF (template name retained): {resolved_tcf}")
-
-    discovery = build_discovery(resolved_tcf)
+    # Report control file tree
+    print(f"TCF: {result.tcf_path}")
     print("\nControl file tree:")
-    pretty_print_control_tree(discovery.control_tree)
+    _print_control_tree(result.control_tree)
 
-    if discovery.missing_control_files:
-        print("\nMissing control files:")
-        for m in discovery.missing_control_files:
-            print(f"  {m}")
+    # Report any control-file issues (missing/unreadable)
+    if result.control_tree.issues:
+        print("\nControl file issues:")
+        for iss in result.control_tree.issues:
+            print(
+                f"  [{iss.severity.value}] {iss.id}: {iss.message} "
+                f"(file: {iss.file})"
+            )
+    else:
+        print("\nControl file issues: (none)")
 
-    scan_result = scan_inputs(discovery.control_tree)
-    print("\nExternal inputs (Stage 1):")
-    _print_input_summary(scan_result.inputs)
+    # Report inputs
+    _print_input_scan(result)
 
 
-if __name__ == "__main__":  # pragma: no cover - CLI entry
-    main()
+if __name__ == "__main__":
+    main(sys.argv[1:])
