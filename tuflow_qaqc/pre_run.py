@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import List, Dict, Optional, Any, Set
+from typing import List, Dict, Optional, Any, Set, Iterable
 import re
 
 
@@ -26,30 +26,30 @@ class Issue:
     line: Optional[int] = None  # line number in file (if applicable)
     details: Dict[str, Any] = field(default_factory=dict)
 
+
+@dataclass
+class ControlNode:
+    """A node in the control file tree for Stage 0 discovery."""
+
+    path: Path
+    children: List["ControlNode"] = field(default_factory=list)
+    missing: bool = False
+
+
 @dataclass
 class DiscoveryResult:
-    """Stage 0: summary of available scenarios, events and wildcard vars."""
+    """Stage 0: resolved TCF and tree of referenced control files."""
+
     tcf_path: Path
-    control_files: Set[Path]                # all .tcf/.tgc/.tbc/.ecf/.tef/other includes
-    scenarios: Set[str]                     # discovered scenario names
-    events: Set[str]                        # discovered event names
-    wildcard_variables: Set[str]            # ~Var~ tokens in any directive/value
-    uses_event_file: bool = False
-    event_file_paths: Set[Path] = field(default_factory=set)
+    control_tree: ControlNode
+    missing_control_files: List[Path] = field(default_factory=list)
 
 
 @dataclass
 class PreRunSettings:
-    """Settings for pre-run checks."""
-    tuflow_exe: Optional[Path] = None  # for later test-run integration
+    """Settings for potential pre-run checks (reserved for future use)."""
 
-    # Expected subfolders under the TCF folder (you can expand this later)
-    check_expected_folders: bool = True
-    expected_folders: Dict[str, List[str]] = field(
-        default_factory=lambda: {
-            "Structure": ["log", "check", "results"],
-        }
-    )
+    tuflow_exe: Optional[Path] = None
 
 
 @dataclass
@@ -68,19 +68,31 @@ class ControlFile:
 
 @dataclass
 class ModelConfig:
-    """Minimal model configuration gleaned from TCF/TGC/ECF for pre-run checks."""
+    """Placeholder for legacy callers; not used in the new flow."""
+
     tcf: ControlFile
     control_files: Dict[Path, ControlFile] = field(default_factory=dict)
-    # Paths referenced in control files, grouped loosely by type
-    referenced_files: Dict[str, Set[Path]] = field(
-        default_factory=lambda: {
-            "control": set(),   # .tgc, .ecf, etc.
-            "gis": set(),       # GIS layers
-            "bc": set(),        # boundary condition time-series
-            "tables": set(),    # tables, lookup CSVs
-            "other": set(),
-        }
-    )
+    referenced_files: Dict[str, Set[Path]] = field(default_factory=dict)
+
+
+@dataclass
+class InputReference:
+    """An external input referenced by a control file."""
+
+    path: Path
+    category: str  # e.g. GIS or Database
+    status: str    # OK or MISSING
+    source_file: Path
+    line: int
+    keyword: str
+
+
+@dataclass
+class InputScanResult:
+    """Stage 1 results summarising GIS/database inputs."""
+
+    tcf_path: Path
+    inputs: List[InputReference]
 
 
 # ---------- Parsing utilities ----------
@@ -98,122 +110,6 @@ DIRECTIVE_RE = re.compile(
     re.VERBOSE,
 )
 
-def _scan_control_file_for_discovery(
-    path: Path,
-    scenarios: set[str],
-    events: set[str],
-    wildcard_vars: set[str],
-    event_file_paths: set[Path],
-) -> None:
-    """
-    Skim a control file (TCF/TGC/TBC/ECF/etc.) for:
-      - Scenario names
-      - Event names
-      - Event File paths
-      - Wildcard variable names (~Var~)
-    """
-    base_dir = path.parent
-
-    try:
-        text = path.read_text(encoding="utf-8", errors="ignore")
-    except Exception:
-        # Don't blow up discovery if a file can't be read
-        return
-
-    for line in text.splitlines():
-        no_comment = _strip_inline_comment(line)
-        stripped = no_comment.strip()
-        if not stripped:
-            continue
-        if COMMENT_RE.match(stripped):
-            continue
-
-        # Scenario logic
-        m = SCENARIO_IF_RE.match(stripped)
-        if m:
-            vals = _split_pipe_values(m.group("vals"))
-            scenarios.update(vals)
-
-        m = MODEL_SCENARIOS_RE.match(stripped)
-        if m:
-            vals = _split_pipe_values(m.group("vals"))
-            scenarios.update(vals)
-
-        # Event logic
-        m = EVENT_IF_RE.match(stripped)
-        if m:
-            vals = _split_pipe_values(m.group("vals"))
-            events.update(vals)
-
-        m = MODEL_EVENTS_RE.match(stripped)
-        if m:
-            vals = _split_pipe_values(m.group("vals"))
-            events.update(vals)
-
-        # Event File
-        m = EVENT_FILE_RE.match(stripped)
-        if m:
-            raw = m.group("path").strip().strip('"').strip("'")
-            if raw:
-                ef_path = (base_dir / raw).resolve()
-                event_file_paths.add(ef_path)
-
-        # Wildcards
-        for wm in WILDCARD_RE.finditer(stripped):
-            wildcard_vars.add(wm.group("var"))
-
-
-def _scan_tef_for_events(tef_path: Path, events: set[str]) -> None:
-    """Scan a TEF (event file) for Define Event blocks."""
-    try:
-        text = tef_path.read_text(encoding="utf-8", errors="ignore")
-    except Exception:
-        return
-
-    for line in text.splitlines():
-        no_comment = _strip_inline_comment(line)
-        stripped = no_comment.strip()
-        if not stripped or COMMENT_RE.match(stripped):
-            continue
-
-        m = DEFINE_EVENT_RE.match(stripped)
-        if m:
-            name = m.group("name").strip()
-            if name:
-                events.add(name)
-
-# ---------- Stage 0 discovery regexes ----------
-
-SCENARIO_IF_RE = re.compile(
-    r"^\s*(If|Else If)\s+Scenario\s*==\s*(?P<vals>.+?)\s*$",
-    re.IGNORECASE,
-)
-
-MODEL_SCENARIOS_RE = re.compile(
-    r"^\s*Model\s+Scenarios\s*==\s*(?P<vals>.+?)\s*$",
-    re.IGNORECASE,
-)
-
-EVENT_IF_RE = re.compile(
-    r"^\s*(If|Else If)\s+Event\s*==\s*(?P<vals>.+?)\s*$",
-    re.IGNORECASE,
-)
-
-MODEL_EVENTS_RE = re.compile(
-    r"^\s*Model\s+Events\s*==\s*(?P<vals>.+?)\s*$",
-    re.IGNORECASE,
-)
-
-EVENT_FILE_RE = re.compile(
-    r"^\s*Event\s+File\s*==\s*(?P<path>.+?)\s*$",
-    re.IGNORECASE,
-)
-
-DEFINE_EVENT_RE = re.compile(
-    r"^\s*Define\s+Event\s*==\s*(?P<name>.+?)\s*$",
-    re.IGNORECASE,
-)
-
 WILDCARD_RE = re.compile(r"~(?P<var>[A-Za-z0-9_]+)~")
 
 INLINE_COMMENT_SPLIT_RE = re.compile(r"(!|//|#)")
@@ -225,70 +121,93 @@ def _strip_inline_comment(line: str) -> str:
     Example:
       'Event File == Event_File.tef  ! Reference' -> 'Event File == Event_File.tef'
     """
+
     parts = INLINE_COMMENT_SPLIT_RE.split(line, maxsplit=1)
     return parts[0]
 
 
-def _split_pipe_values(vals: str) -> list[str]:
-    """Split 'EXG | DEV | CC2070' into a list of clean strings."""
-    return [v.strip() for v in vals.split("|") if v.strip()]
-
 def parse_control_file(path: Path) -> ControlFile:
-    """Parse a TUFLOW control file (TCF/TGC/ECF) into directives."""
+    """Parse a TUFLOW control file (TCF/TGC/ECF/etc.) into directives."""
+
     directives: List[ControlDirective] = []
 
     try:
         text = path.read_text(encoding="utf-8", errors="ignore")
     except FileNotFoundError:
         raise
-    except Exception as e:
+    except Exception as e:  # pragma: no cover - defensive
         raise RuntimeError(f"Failed to read control file {path}: {e}") from e
 
     for i, line in enumerate(text.splitlines(), start=1):
-        if not line.strip():
+        stripped = _strip_inline_comment(line)
+        if not stripped.strip():
             continue
-        if COMMENT_RE.match(line):
+        if COMMENT_RE.match(stripped):
             continue
 
-        m = DIRECTIVE_RE.match(line)
+        m = DIRECTIVE_RE.match(stripped)
         if not m:
-            # Not a standard directive; keep raw if you want later
+            # Not a standard directive; keep raw if needed later
             continue
 
         key = m.group("key").strip()
         value = m.group("value").strip()
-        directives.append(
-            ControlDirective(keyword=key, value=value, line=i, raw=line)
-        )
+        directives.append(ControlDirective(keyword=key, value=value, line=i, raw=line))
 
     return ControlFile(path=path, directives=directives)
 
 
-# Keywords that indicate other control files
-CONTROL_KEYWORDS = {
-    "Geometry Control",
-    "BC Control",
-    "GIS Control",
-    "Parameter Control",
-    "Output Control",
-    "1D Control",
-    "2D Control",
-    "Event Control",
-    "Read File",
-    "Read Control File",
+# ---------- Stage 0: wildcard resolution + control file tree ----------
+
+# Keywords that indicate other control files (case-insensitive)
+CONTROL_FILE_KEYWORDS = {
+    "geometry control",
+    "geometry control file",
+    "bc control",
+    "bc control file",
+    "estry control",
+    "1d control",
+    "2d control",
+    "quadtree control",
+    "rainfall control",
+    "rainfall control file",
+    "operations control",
+    "event file",
+    "read file",
+    "read control file",
+    "soils file",
 }
 
-# Heuristics to categorise paths
-GIS_HINTS = ("2d_", "1d_", "Read GIS", "Read MI", "Read GRID")
-BC_HINTS = ("BC Database", "bc_dbase", "bcdb", "Rainfall", "Inflow", "Hydrograph")
-TABLE_HINTS = ("Read Table", "Read Materials", "Manning Table")
+# Heuristics to categorise external inputs
+GIS_INPUT_HINTS = (
+    "read gis",
+    "read mi",
+    "read grid",
+    "z shape",
+    "z line",
+    "z pts",
+    "mat",
+    "code",
+    "grid",
+    "dem",
+    "raster",
+)
+
+DATABASE_INPUT_HINTS = (
+    "database",
+    "dbase",
+    "table",
+    "materials",
+    "bc table",
+    "bc database",
+    "rainfall database",
+    "hydrograph",
+)
 
 
 def _extract_candidate_paths(value: str) -> List[str]:
-    """
-    Very simple heuristic to pull path-like tokens from a directive value.
-    We just look for tokens with a '.' that don't look like numbers.
-    """
+    """Pull simple path-like tokens from a directive value."""
+
     tokens = re.split(r"[\s,;]+", value.strip('"'))
     paths: List[str] = []
     for token in tokens:
@@ -297,488 +216,277 @@ def _extract_candidate_paths(value: str) -> List[str]:
     return paths
 
 
-def _categorise_path(keyword: str, path: Path) -> str:
-    k = keyword.lower()
-    if any(h.lower() in k for h in GIS_HINTS):
-        return "gis"
-    if any(h.lower() in k for h in BC_HINTS):
-        return "bc"
-    if any(h.lower() in k for h in TABLE_HINTS):
-        return "tables"
-    if "control" in k:
-        return "control"
-    return "other"
+def _keyword_in_set(keyword: str, options: Iterable[str]) -> bool:
+    key_norm = keyword.strip().lower()
+    return any(key_norm == opt for opt in options)
 
 
-def _collect_control_files_and_paths(
-    cf: ControlFile,
-    model: ModelConfig,
-    visited: Set[Path],
-) -> None:
-    """Recursive collection of control files and referenced paths."""
-    if cf.path in visited:
-        return
-    visited.add(cf.path)
-    model.control_files[cf.path] = cf
+def detect_wildcards_in_name(name: str) -> Set[str]:
+    """Return wildcard tokens (e.g. e1, s2) found in a filename."""
+
+    return {m.group("var").lower() for m in WILDCARD_RE.finditer(name)}
+
+
+def resolve_tcf_template(tcf_template: Path, wildcard_values: Dict[str, str]) -> Path:
+    """
+    Resolve a TCF template filename by substituting ~eN~/~sN~ wildcards.
+
+    The resolved name may not exist on disk; callers should decide whether to enforce
+    presence. This keeps the template path usable without requiring a specific
+    resolved file name.
+    """
+
+    tcf_template = tcf_template.resolve()
+    required = detect_wildcards_in_name(tcf_template.name)
+    missing = {w for w in required if w not in {k.lower() for k in wildcard_values}}
+    if missing:
+        missing_list = ", ".join(sorted(missing))
+        raise ValueError(f"Missing values for wildcards: {missing_list}")
+
+    resolved_name = tcf_template.name
+    for key, val in wildcard_values.items():
+        resolved_name = resolved_name.replace(f"~{key}~", val)
+        resolved_name = resolved_name.replace(f"~{key.lower()}~", val)
+        resolved_name = resolved_name.replace(f"~{key.upper()}~", val)
+
+    return tcf_template.with_name(resolved_name)
+
+
+def _find_control_children(cf: ControlFile) -> List[Path]:
+    """Return referenced control files from a parsed control file."""
 
     base_dir = cf.path.parent
-
+    children: List[Path] = []
     for d in cf.directives:
-        # 1) Control files
-        if d.keyword.strip() in CONTROL_KEYWORDS:
+        if _keyword_in_set(d.keyword, CONTROL_FILE_KEYWORDS):
             for token in _extract_candidate_paths(d.value):
-                child_path = (base_dir / token).resolve()
-                model.referenced_files["control"].add(child_path)
-                if child_path.suffix.lower() in {".tcf", ".tgc", ".ecf"}:
-                    if child_path not in model.control_files:
-                        try:
-                            child_cf = parse_control_file(child_path)
-                        except FileNotFoundError:
-                            # Missing control file; handled in static checks
-                            continue
-                        _collect_control_files_and_paths(
-                            child_cf, model=model, visited=visited
-                        )
+                children.append((base_dir / token).resolve())
+    return children
+
+
+def _build_control_node(
+    path: Path,
+    missing: list[Path],
+    cache: Dict[Path, ControlNode],
+) -> ControlNode:
+    """Recursively build the control file tree starting from ``path``."""
+
+    norm = path.resolve()
+    if norm in cache:
+        return cache[norm]
+
+    if not norm.exists():
+        node = ControlNode(path=norm, missing=True)
+        cache[norm] = node
+        missing.append(norm)
+        return node
+
+    try:
+        cf = parse_control_file(norm)
+    except Exception:
+        node = ControlNode(path=norm, missing=True)
+        cache[norm] = node
+        missing.append(norm)
+        return node
+
+    node = ControlNode(path=norm)
+    cache[norm] = node
+    for child_path in _find_control_children(cf):
+        node.children.append(_build_control_node(child_path, missing, cache))
+    return node
+
+
+def build_discovery(tcf_path: Path) -> DiscoveryResult:
+    """Stage 0: resolve control file includes into a tree structure."""
+
+    missing: list[Path] = []
+    cache: Dict[Path, ControlNode] = {}
+    root = _build_control_node(tcf_path, missing=missing, cache=cache)
+    return DiscoveryResult(tcf_path=tcf_path, control_tree=root, missing_control_files=missing)
+
+
+# ---------- Stage 1: external input listing ----------
+
+
+def _categorise_input(keyword: str) -> Optional[str]:
+    k = keyword.lower()
+    if any(h in k for h in GIS_INPUT_HINTS):
+        return "GIS"
+    if any(h in k for h in DATABASE_INPUT_HINTS):
+        return "Database"
+    return None
+
+
+def _scan_inputs_in_control_file(cf: ControlFile) -> List[InputReference]:
+    """Extract GIS/database input references from a control file."""
+
+    refs: List[InputReference] = []
+    base_dir = cf.path.parent
+    for d in cf.directives:
+        if _keyword_in_set(d.keyword, CONTROL_FILE_KEYWORDS):
             continue
 
-        # 2) Other file references (GIS, BC, tables, etc.)
+        category = _categorise_input(d.keyword)
+        if category is None:
+            continue
+
         for token in _extract_candidate_paths(d.value):
             p = (base_dir / token).resolve()
-            category = _categorise_path(d.keyword, p)
-            model.referenced_files.setdefault(category, set()).add(p)
-
-
-def build_model_config(tcf_path: Path) -> ModelConfig:
-    """Build ModelConfig from the main TCF and referenced control files."""
-    tcf_path = tcf_path.resolve()
-    tcf_cf = parse_control_file(tcf_path)
-    model = ModelConfig(tcf=tcf_cf)
-
-    visited: Set[Path] = set()
-    _collect_control_files_and_paths(cf=tcf_cf, model=model, visited=visited)
-
-    return model
-
-# ---------- Helper utilities for checks ----------
-
-def find_directives(cf: ControlFile, key: str) -> list[ControlDirective]:
-    """Find all directives in a control file with a given keyword (case-insensitive)."""
-    key_norm = key.strip().lower()
-    return [
-        d for d in cf.directives
-        if d.keyword.strip().lower() == key_norm
-    ]
-
-
-def _parse_float(value: str) -> Optional[float]:
-    """Try to parse a float from a directive value; return None if it fails."""
-    # Take first token that looks like a number
-    token = value.strip().split()[0]
-    try:
-        return float(token)
-    except ValueError:
-        return None
-
-
-# ---------- Static checks ----------
-
-@dataclass
-class PreRunResult:
-    tcf_path: Path
-    issues: List[Issue]
-    static_checks_ok: bool
-
-
-def check_tcf_exists(tcf_path: Path) -> List[Issue]:
-    issues: List[Issue] = []
-    if not tcf_path.exists():
-        issues.append(
-            Issue(
-                id="PR001_TCF_MISSING",
-                severity=Severity.CRITICAL,
-                category="Structure",
-                message=f"TCF file not found: {tcf_path}",
-                suggestion="Verify the selected TCF path. Ensure the model folder is accessible.",
-                file=tcf_path,
-            )
-        )
-    return issues
-
-
-def check_expected_folders(tcf_path: Path, settings: PreRunSettings) -> List[Issue]:
-    issues: List[Issue] = []
-    if not settings.check_expected_folders:
-        return issues
-
-    root = tcf_path.parent
-    for category, rel_names in settings.expected_folders.items():
-        for rel in rel_names:
-            folder = root / rel
-            if not folder.exists():
-                issues.append(
-                    Issue(
-                        id=f"PR010_FOLDER_MISSING_{rel.lower()}",
-                        severity=Severity.MAJOR,
-                        category="Structure",
-                        message=f"Expected folder '{rel}' not found in model directory.",
-                        suggestion=(
-                            f"Create the '{rel}' folder under {root} "
-                            f"to keep logs/check/results organised and consistent."
-                        ),
-                        file=folder,
-                    )
-                )
-    return issues
-
-
-def check_control_files_exist(model: ModelConfig) -> List[Issue]:
-    issues: List[Issue] = []
-
-    for p in model.referenced_files.get("control", set()):
-        if not p.exists():
-            issues.append(
-                Issue(
-                    id="PR020_CONTROL_FILE_MISSING",
-                    severity=Severity.CRITICAL,
-                    category="ControlFiles",
-                    message=f"Referenced control file not found: {p}",
-                    suggestion="Check 'Geometry Control', 'BC Control' and any 'Read File' "
-                               "directives in the TCF/TGC to ensure paths are correct.",
-                    file=p,
+            status = "OK" if p.exists() else "MISSING"
+            refs.append(
+                InputReference(
+                    path=p,
+                    category=category,
+                    status=status,
+                    source_file=cf.path,
+                    line=d.line,
+                    keyword=d.keyword,
                 )
             )
-    return issues
+
+    return refs
 
 
-def check_referenced_files_exist(model: ModelConfig) -> List[Issue]:
-    issues: List[Issue] = []
-    for category, paths in model.referenced_files.items():
-        if category == "control":
-            continue  # handled separately
+def _iter_control_nodes(node: ControlNode) -> Iterable[ControlNode]:
+    yield node
+    for child in node.children:
+        yield from _iter_control_nodes(child)
 
-        for p in paths:
-            if not p.exists():
-                sev = Severity.CRITICAL if category in {"gis", "bc"} else Severity.MAJOR
-                issues.append(
-                    Issue(
-                        id="PR030_REFERENCED_FILE_MISSING",
-                        severity=sev,
-                        category=f"Paths_{category}",
-                        message=f"Referenced {category} file not found: {p}",
-                        suggestion=(
-                            f"Update the path in the control files or ensure the {category} file "
-                            f"is placed at the expected location."
-                        ),
-                        file=p,
-                        details={"ref_type": category},
-                    )
-                )
-    return issues
 
-def check_time_settings(model: ModelConfig) -> List[Issue]:
+def scan_inputs(control_tree: ControlNode) -> InputScanResult:
+    """Stage 1: list GIS/database inputs from all control files in the tree."""
+
+    inputs: List[InputReference] = []
+    parsed_cache: Dict[Path, ControlFile] = {}
+    for node in _iter_control_nodes(control_tree):
+        if node.missing:
+            continue
+        if node.path in parsed_cache:
+            cf = parsed_cache[node.path]
+        else:
+            try:
+                cf = parse_control_file(node.path)
+            except Exception:
+                continue
+            parsed_cache[node.path] = cf
+        inputs.extend(_scan_inputs_in_control_file(cf))
+
+    return InputScanResult(tcf_path=control_tree.path, inputs=inputs)
+
+
+def pretty_print_control_tree(node: ControlNode, prefix: str = "") -> None:
+    """Print a simple text tree of control file references."""
+
+    marker = "[MISSING] " if node.missing else ""
+    print(f"{prefix}{marker}{node.path.name}")
+    for i, child in enumerate(node.children):
+        is_last = i == len(node.children) - 1
+        new_prefix = prefix + ("    " if is_last else "│   ")
+        connector = "└── " if is_last else "├── "
+        print(f"{prefix}{connector}", end="")
+        pretty_print_control_tree(child, prefix=new_prefix)
+
+
+def _parse_wildcard_args(args: List[str]) -> Dict[str, str]:
     """
-    Check that Start Time, End Time and Time Step are present and sensible.
-    This is a light sanity check, not a full physical consistency check.
+    Parse wildcard assignments from leftover CLI args (e.g. ``--e1 001`` or
+    ``--e1=001``).
+
+    Accepts both space-separated pairs and inline ``=`` forms so Windows users can
+    avoid multi-line quoting issues.
     """
-    issues: List[Issue] = []
 
-    tcf = model.tcf
+    values: Dict[str, str] = {}
+    i = 0
+    while i < len(args):
+        key = args[i]
 
-    # 1) Fetch directives from main TCF (not from included controls)
-    start_dirs = find_directives(tcf, "Start Time")
-    end_dirs = find_directives(tcf, "End Time")
-    dt_dirs = find_directives(tcf, "Time Step")
+        if key.startswith("-") and "=" in key:
+            name, value = key.split("=", 1)
+            name = name.lstrip("-")
+            i += 1
+        else:
+            if not key.startswith("-"):
+                raise ValueError(f"Unexpected argument: {key}")
+            name = key.lstrip("-")
+            if i + 1 >= len(args):
+                raise ValueError(f"Missing value for wildcard {key}")
+            value = args[i + 1]
+            i += 2
 
-    # 2) Presence checks
-    if not start_dirs:
-        issues.append(
-            Issue(
-                id="PR040_START_TIME_MISSING",
-                severity=Severity.CRITICAL,
-                category="Time",
-                message="Start Time directive is missing from the TCF.",
-                suggestion="Add a 'Start Time' directive to the TCF (e.g. 'Start Time == 0').",
-                file=tcf.path,
-            )
-        )
-    if not end_dirs:
-        issues.append(
-            Issue(
-                id="PR041_END_TIME_MISSING",
-                severity=Severity.CRITICAL,
-                category="Time",
-                message="End Time directive is missing from the TCF.",
-                suggestion="Add an 'End Time' directive to the TCF (e.g. 'End Time == 72').",
-                file=tcf.path,
-            )
-        )
-    if not dt_dirs:
-        issues.append(
-            Issue(
-                id="PR042_TIME_STEP_MISSING",
-                severity=Severity.CRITICAL,
-                category="Time",
-                message="Time Step directive is missing from the TCF.",
-                suggestion="Add a 'Time Step' directive to the TCF (e.g. 'Time Step == 1').",
-                file=tcf.path,
-            )
-        )
+        if not re.fullmatch(r"[es]\d+", name, flags=re.IGNORECASE):
+            raise ValueError(f"Wildcard arguments must look like --e1/--s1, got {key}")
 
-    # If any are totally missing, don't try to parse values
-    if not start_dirs or not end_dirs or not dt_dirs:
-        return issues
+        values[name] = value
 
-    # 3) Value checks (use the FIRST occurrence for now)
-    start_val = _parse_float(start_dirs[0].value)
-    end_val = _parse_float(end_dirs[0].value)
-    dt_val = _parse_float(dt_dirs[0].value)
+    return values
 
-    # If parsing fails, treat as Major issues
-    if start_val is None:
-        issues.append(
-            Issue(
-                id="PR043_START_TIME_NOT_NUMERIC",
-                severity=Severity.MAJOR,
-                category="Time",
-                message=f"Could not parse Start Time as a number: '{start_dirs[0].value}'.",
-                suggestion="Ensure Start Time is specified as a numeric value (e.g. 'Start Time == 0').",
-                file=tcf.path,
-                line=start_dirs[0].line,
-            )
-        )
-    if end_val is None:
-        issues.append(
-            Issue(
-                id="PR044_END_TIME_NOT_NUMERIC",
-                severity=Severity.MAJOR,
-                category="Time",
-                message=f"Could not parse End Time as a number: '{end_dirs[0].value}'.",
-                suggestion="Ensure End Time is specified as a numeric value (e.g. 'End Time == 72').",
-                file=tcf.path,
-                line=end_dirs[0].line,
-            )
-        )
-    if dt_val is None:
-        issues.append(
-            Issue(
-                id="PR045_TIME_STEP_NOT_NUMERIC",
-                severity=Severity.MAJOR,
-                category="Time",
-                message=f"Could not parse Time Step as a number: '{dt_dirs[0].value}'.",
-                suggestion="Ensure Time Step is specified as a numeric value (e.g. 'Time Step == 1').",
-                file=tcf.path,
-                line=dt_dirs[0].line,
-            )
-        )
 
-    # If any of them are non-numeric, no more numeric checks
-    if start_val is None or end_val is None or dt_val is None:
-        return issues
+def _print_input_summary(inputs: List[InputReference]) -> None:
+    if not inputs:
+        print("No external inputs found in control files.")
+        return
 
-    # 4) Basic numeric sanity
-    if dt_val <= 0:
-        issues.append(
-            Issue(
-                id="PR046_TIME_STEP_NONPOSITIVE",
-                severity=Severity.CRITICAL,
-                category="Time",
-                message=f"Time Step is non-positive: {dt_val}.",
-                suggestion="Use a positive Time Step (e.g. 0.5, 1.0).",
-                file=tcf.path,
-                line=dt_dirs[0].line,
-            )
-        )
+    by_category: Dict[str, List[InputReference]] = {}
+    for ref in inputs:
+        by_category.setdefault(ref.category, []).append(ref)
 
-    if end_val <= start_val:
-        issues.append(
-            Issue(
-                id="PR047_END_NOT_AFTER_START",
-                severity=Severity.MAJOR,
-                category="Time",
-                message=f"End Time ({end_val}) is not greater than Start Time ({start_val}).",
-                suggestion="Ensure End Time is greater than Start Time to define a valid simulation duration.",
-                file=tcf.path,
-                line=end_dirs[0].line,
-            )
-        )
+    for category, refs in by_category.items():
+        print(f"\n{category} Inputs:")
+        seen: Set[Path] = set()
+        for ref in refs:
+            if ref.path in seen:
+                continue
+            seen.add(ref.path)
+            status = "[OK]" if ref.status == "OK" else "[MISSING]"
+            print(f"  {status} {ref.path} (from {ref.source_file.name} line {ref.line})")
 
-    # Optional: rough "too long" check (configurable later). For now, just warn if > 500 hrs.
-    duration = end_val - start_val
-    if duration > 500:
-        issues.append(
-            Issue(
-                id="PR048_LONG_SIM_DURATION",
-                severity=Severity.MINOR,
-                category="Time",
-                message=f"Simulation duration is very long ({duration} time units).",
-                suggestion="Confirm that this long duration is intentional. "
-                           "If using hours, consider whether a shorter simulation window would suffice.",
-                file=tcf.path,
-                line=end_dirs[0].line,
-                details={"duration": duration},
-            )
-        )
 
-    return issues
+def main(argv: Optional[List[str]] = None) -> None:
+    """CLI entry point implementing wildcard-driven Stage 0 + Stage 1."""
 
-def discover_run_options(tcf: str | Path) -> DiscoveryResult:
-    """
-    Stage 0: Discover available Scenarios, Events and wildcard variables
-    from all control files referenced by the main TCF.
-    """
-    tcf_path = Path(tcf).resolve()
+    import argparse
 
-    # Reuse ModelConfig builder to follow Geometry/BC/Read File includes
-    model = build_model_config(tcf_path)
-
-    control_files: set[Path] = set(model.control_files.keys())
-    scenarios: set[str] = set()
-    events: set[str] = set()
-    wildcard_vars: set[str] = set()
-    uses_event_file = False
-    event_file_paths: set[Path] = set()
-
-    # First pass: scan all known control files (tcf/tgc/tbc/ecf/etc.)
-    for cf_path in control_files:
-        _scan_control_file_for_discovery(
-            cf_path,
-            scenarios=scenarios,
-            events=events,
-            wildcard_vars=wildcard_vars,
-            event_file_paths=event_file_paths,
-        )
-
-    # Second pass: scan any TEF files we discovered for Define Event
-    for ef in event_file_paths:
-        uses_event_file = True
-        if ef.exists():
-            _scan_tef_for_events(ef, events)
-        control_files.add(ef)
-
-    return DiscoveryResult(
-        tcf_path=tcf_path,
-        control_files=control_files,
-        scenarios=scenarios,
-        events=events,
-        wildcard_variables=wildcard_vars,
-        uses_event_file=uses_event_file,
-        event_file_paths=event_file_paths,
+    parser = argparse.ArgumentParser(
+        description=(
+            "Resolve TUFLOW TCF templates, build control file trees, and list GIS/"
+            "database inputs."
+        ),
+        allow_abbrev=False,
     )
+    parser.add_argument(
+        "tcf_template",
+        help="Path to the TCF template filename (may contain ~eN~/~sN~ wildcards)",
+    )
+    args, unknown = parser.parse_known_args(argv)
 
-
-def run_pre_run_checks(
-    tcf: str | Path,
-    settings: Optional[PreRunSettings] = None,
-) -> PreRunResult:
-    """Run Stage 1 static pre-run checks (no TUFLOW execution)."""
-    if settings is None:
-        settings = PreRunSettings()
-
-    tcf_path = Path(tcf).resolve()
-    all_issues: List[Issue] = []
-
-    # 1) TCF exists
-    all_issues.extend(check_tcf_exists(tcf_path))
-    if any(i.severity == Severity.CRITICAL for i in all_issues):
-        return PreRunResult(tcf_path=tcf_path, issues=all_issues, static_checks_ok=False)
-
-    # 2) Folder structure
-    all_issues.extend(check_expected_folders(tcf_path, settings))
-
-    # 3) Build model config (parse TCF + referenced control files, collect paths)
     try:
-        model = build_model_config(tcf_path)
-    except Exception as e:
-        all_issues.append(
-            Issue(
-                id="PR099_PARSE_ERROR",
-                severity=Severity.CRITICAL,
-                category="Parsing",
-                message=f"Error while parsing control files: {e}",
-                suggestion="Inspect the TCF and included control files for syntax issues "
-                           "or unusual encoding.",
-                file=tcf_path,
-            )
-        )
-        return PreRunResult(tcf_path=tcf_path, issues=all_issues, static_checks_ok=False)
+        wildcard_values = _parse_wildcard_args(unknown)
+    except ValueError as exc:  # pragma: no cover - CLI guard
+        parser.error(str(exc))
 
-     # 4) Control file existence checks
-    all_issues.extend(check_control_files_exist(model))
+    tcf_template = Path(args.tcf_template)
 
-    # 5) Referenced paths (GIS / BC / tables)
-    all_issues.extend(check_referenced_files_exist(model))
+    try:
+        resolved_tcf = resolve_tcf_template(tcf_template, wildcard_values)
+    except ValueError as exc:  # pragma: no cover - CLI guard
+        parser.error(str(exc))
 
-    # 6) Time control sanity (Start/End/Time Step)
-    all_issues.extend(check_time_settings(model))
+    print(f"TCF (template name retained): {resolved_tcf}")
 
-    static_ok = not any(i.severity == Severity.CRITICAL for i in all_issues)
-    return PreRunResult(tcf_path=tcf_path, issues=all_issues, static_checks_ok=static_ok)
+    discovery = build_discovery(resolved_tcf)
+    print("\nControl file tree:")
+    pretty_print_control_tree(discovery.control_tree)
+
+    if discovery.missing_control_files:
+        print("\nMissing control files:")
+        for m in discovery.missing_control_files:
+            print(f"  {m}")
+
+    scan_result = scan_inputs(discovery.control_tree)
+    print("\nExternal inputs (Stage 1):")
+    _print_input_summary(scan_result.inputs)
 
 
-# ---------- Simple CLI for quick testing ----------
-
-if __name__ == "__main__":
-    import sys
-
-    if len(sys.argv) < 2:
-        print(
-            "Usage:\n"
-            "  python -m tuflow_qaqc.pre_run --discover path/to/model.tcf\n"
-            "  python -m tuflow_qaqc.pre_run path/to/model.tcf"
-        )
-        raise SystemExit(1)
-
-    # Simple subcommand detection
-    if sys.argv[1] == "--discover":
-        if len(sys.argv) < 3:
-            print("Please provide a TCF path after --discover.")
-            raise SystemExit(1)
-        tcf_arg = sys.argv[2]
-        dr = discover_run_options(tcf_arg)
-
-        print(f"TCF: {dr.tcf_path}")
-        print("\nControl files:")
-        for p in sorted(dr.control_files):
-            print(f"  {p}")
-
-        if dr.scenarios:
-            print("\nScenarios found:")
-            for s in sorted(dr.scenarios):
-                print(f"  {s}")
-        else:
-            print("\nScenarios found: (none)")
-
-        if dr.events:
-            print("\nEvents found:")
-            for e in sorted(dr.events):
-                print(f"  {e}")
-        else:
-            print("\nEvents found: (none)")
-
-        if dr.wildcard_variables:
-            print("\nWildcard variables (from ~Var~ tokens):")
-            for v in sorted(dr.wildcard_variables):
-                print(f"  {v}")
-        else:
-            print("\nWildcard variables: (none)")
-
-        if dr.uses_event_file:
-            print("\nEvent files:")
-            for ef in sorted(dr.event_file_paths):
-                print(f"  {ef}")
-
-        raise SystemExit(0)
-
-    # Default: run Stage 1 static pre-run checks
-    tcf_arg = sys.argv[1]
-    result = run_pre_run_checks(tcf_arg)
-
-    print(f"TCF: {result.tcf_path}")
-    print(f"Static checks OK: {result.static_checks_ok}")
-    print("Issues:")
-    for i in result.issues:
-        print(
-            f"- [{i.severity.value}] {i.id} / {i.category}\n"
-            f"  {i.message}\n"
-            f"  Suggestion: {i.suggestion}\n"
-        )
+if __name__ == "__main__":  # pragma: no cover - CLI entry
+    main()
