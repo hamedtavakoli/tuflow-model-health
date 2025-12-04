@@ -231,8 +231,9 @@ def resolve_tcf_template(tcf_template: Path, wildcard_values: Dict[str, str]) ->
     """
     Resolve a TCF template filename by substituting ~eN~/~sN~ wildcards.
 
-    Raises ValueError if any required wildcard is missing and FileNotFoundError if the
-    resolved file does not exist.
+    The resolved name may not exist on disk; callers should decide whether to enforce
+    presence. This keeps the template path usable without requiring a specific
+    resolved file name.
     """
 
     tcf_template = tcf_template.resolve()
@@ -248,11 +249,7 @@ def resolve_tcf_template(tcf_template: Path, wildcard_values: Dict[str, str]) ->
         resolved_name = resolved_name.replace(f"~{key.lower()}~", val)
         resolved_name = resolved_name.replace(f"~{key.upper()}~", val)
 
-    resolved_path = tcf_template.with_name(resolved_name)
-    if not resolved_path.exists():
-        raise FileNotFoundError(f"Resolved TCF does not exist: {resolved_path}")
-
-    return resolved_path
+    return tcf_template.with_name(resolved_name)
 
 
 def _find_control_children(cf: ControlFile) -> List[Path]:
@@ -391,26 +388,37 @@ def pretty_print_control_tree(node: ControlNode, prefix: str = "") -> None:
 
 
 def _parse_wildcard_args(args: List[str]) -> Dict[str, str]:
-    """Parse wildcard assignments from leftover CLI args (e.g. --e1 001)."""
+    """
+    Parse wildcard assignments from leftover CLI args (e.g. ``--e1 001`` or
+    ``--e1=001``).
 
-    if len(args) % 2 != 0:
-        raise ValueError("Wildcard arguments must be pairs like --e1 001")
+    Accepts both space-separated pairs and inline ``=`` forms so Windows users can
+    avoid multi-line quoting issues.
+    """
 
     values: Dict[str, str] = {}
     i = 0
     while i < len(args):
         key = args[i]
-        if not key.startswith("-"):
-            raise ValueError(f"Unexpected argument: {key}")
-        name = key.lstrip("-")
+
+        if key.startswith("-") and "=" in key:
+            name, value = key.split("=", 1)
+            name = name.lstrip("-")
+            i += 1
+        else:
+            if not key.startswith("-"):
+                raise ValueError(f"Unexpected argument: {key}")
+            name = key.lstrip("-")
+            if i + 1 >= len(args):
+                raise ValueError(f"Missing value for wildcard {key}")
+            value = args[i + 1]
+            i += 2
+
         if not re.fullmatch(r"[es]\d+", name, flags=re.IGNORECASE):
             raise ValueError(f"Wildcard arguments must look like --e1/--s1, got {key}")
-        try:
-            value = args[i + 1]
-        except IndexError:
-            raise ValueError(f"Missing value for wildcard {key}")
+
         values[name] = value
-        i += 2
+
     return values
 
 
@@ -463,10 +471,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         resolved_tcf = resolve_tcf_template(tcf_template, wildcard_values)
     except ValueError as exc:  # pragma: no cover - CLI guard
         parser.error(str(exc))
-    except FileNotFoundError as exc:  # pragma: no cover - CLI guard
-        parser.error(str(exc))
 
-    print(f"Resolved TCF: {resolved_tcf}")
+    print(f"TCF (template name retained): {resolved_tcf}")
 
     discovery = build_discovery(resolved_tcf)
     print("\nControl file tree:")
