@@ -16,7 +16,7 @@ def run_tuflow_test(
     tuflow_exe: Path,
     wildcards: Dict[str, str],
 ) -> Tuple[int, str, str]:
-    """
+    r"""
     Run TUFLOW in test mode (-t) for the given TCF.
 
     Correct form (as per CMD usage):

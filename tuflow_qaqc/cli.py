@@ -108,14 +108,4 @@ def print_validation_report(
         print("\nModel QA checks (5.x/6.x): no issues flagged.")
 
 
-def print_usage() -> None:
-    """Print usage information."""
-    print(
-        "Usage:\n"
-        "  python -m tuflow_qaqc.pre_run [options] path/to/model.tcf [wildcard args]\n\n"
-        "Options:\n"
-        "  --run-test           Run TUFLOW in test mode (-t) after static checks.\n"
-        "  --tuflow-exe PATH    Path to TUFLOW executable (e.g. TUFLOW_iSP_w64.exe).\n\n"
-        "Wildcard args example:\n"
-        "  -e1 00100Y -e2 0060m -e3 tp01 -s1 5m -s2 CL0\n"
-    )
+

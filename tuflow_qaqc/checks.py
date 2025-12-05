@@ -12,37 +12,12 @@ from .config import (
     MIN_HPC_TIMESTEP_TINY, HPC_DTMAX_FACTOR_WARN,
     COURANT_C_ASSUMED, COURANT_MAJOR, COURANT_MINOR,
     MAX_OUTPUTS_MAJOR, MIN_OUTPUTS_MINOR,
-    MANNING_MIN_ACCEPTABLE, MANNING_MAX_ACCEPTABLE, MANNING_CRITICAL_HIGH,
-    IL_MAJOR_THRESHOLD, IL_CRITICAL_THRESHOLD,
-    CL_MAJOR_THRESHOLD, CL_CRITICAL_THRESHOLD
 )
 from .core import (
-    Issue, Severity, TuflowTlfSummary, TuflowHpcSummary, TuflowTestResult, TuflowMaterial
+    Issue, Severity, TuflowTlfSummary, TuflowHpcSummary, TuflowTestResult
 )
 from .parsing import _extract_first_float
-
-
-def _make_issue(
-    issue_id: str,
-    severity: Severity,
-    category: str,
-    message: str,
-    suggestion: str = "",
-    file: Optional[Path] = None,
-    line: Optional[int] = None,
-    details: Optional[Dict[str, Any]] = None,
-) -> Issue:
-    """Factory function for creating Issue objects."""
-    return Issue(
-        id=issue_id,
-        severity=severity,
-        category=category,
-        message=message,
-        suggestion=suggestion,
-        file=file,
-        line=line,
-        details=details or {},
-    )
+from .validators import _make_issue, MANNING_N_CHECKER, SOIL_IL_CHECKER, SOIL_CL_CHECKER
 
 
 def _normalise_solution_scheme(raw: Optional[str]) -> Optional[str]:
@@ -453,12 +428,9 @@ def run_time_and_timestep_checks(
 # ---- 6.x parameter sanity checks ----
 
 def _check_manning_n(tlf_summary: Optional[TuflowTlfSummary]) -> List[Issue]:
-    """Check Manning's roughness values for physical reasonableness."""
-    issues: List[Issue] = []
-    if not tlf_summary:
-        return issues
-
-    if not tlf_summary.materials:
+    """Check Manning's roughness values using generic ParameterChecker."""
+    if not tlf_summary or not tlf_summary.materials:
+        issues: List[Issue] = []
         issues.append(
             _make_issue(
                 "N00",
@@ -466,29 +438,20 @@ def _check_manning_n(tlf_summary: Optional[TuflowTlfSummary]) -> List[Issue]:
                 "ManningN",
                 "No material values reported in .tlf; Manning's n sanity check skipped.",
                 suggestion="Confirm that materials are defined and that the .tlf contains material values.",
-                file=tlf_summary.path,
+                file=tlf_summary.path if tlf_summary else None,
             )
         )
-        return issues
-
-    ns: List[float] = []
-    out_of_range_materials: List[str] = []
-    critical_materials: List[str] = []
-
-    for mat in tlf_summary.materials:
-        if mat.manning_n is None:
-            continue
-        n = mat.manning_n
-        ns.append(n)
-        label = f"{mat.name} (index {mat.index})"
-
-        if n <= 0.0 or n >= MANNING_CRITICAL_HIGH:
-            critical_materials.append(f"{label}: n={n}")
-        elif n < MANNING_MIN_ACCEPTABLE or n > MANNING_MAX_ACCEPTABLE:
-            out_of_range_materials.append(f"{label}: n={n}")
-
-    if not ns:
-        issues.append(
+        return issues if tlf_summary else []
+    
+    # Collect Manning's n values for checking
+    manning_params = [
+        (mat.name, mat.manning_n, f"Manning's n")
+        for mat in tlf_summary.materials
+        if mat.manning_n is not None
+    ]
+    
+    if not manning_params:
+        return [
             _make_issue(
                 "N01",
                 Severity.MINOR,
@@ -497,43 +460,14 @@ def _check_manning_n(tlf_summary: Optional[TuflowTlfSummary]) -> List[Issue]:
                 suggestion="Check the material definitions in the control files.",
                 file=tlf_summary.path,
             )
-        )
-        return issues
-
-    min_n = min(ns)
-    max_n = max(ns)
-
-    if critical_materials:
-        issues.append(
-            _make_issue(
-                "N02",
-                Severity.CRITICAL,
-                "ManningN",
-                f"Manning's n has non-physical or extreme values (min={min_n:.3f}, max={max_n:.3f}).",
-                suggestion="Review material roughness values; correct any non-physical entries.",
-                file=tlf_summary.path,
-                details={"materials": critical_materials},
-            )
-        )
-    elif out_of_range_materials:
-        issues.append(
-            _make_issue(
-                "N03",
-                Severity.MAJOR,
-                "ManningN",
-                f"Manning's n values outside [{MANNING_MIN_ACCEPTABLE}, {MANNING_MAX_ACCEPTABLE}] "
-                f"(min={min_n:.3f}, max={max_n:.3f}).",
-                suggestion="Confirm that high or low roughness values are intentional and documented.",
-                file=tlf_summary.path,
-                details={"materials": out_of_range_materials},
-            )
-        )
-
-    return issues
+        ]
+    
+    # Use generic checker
+    return MANNING_N_CHECKER.check(manning_params, source_file=tlf_summary.path)
 
 
 def _check_soil_ilcl(tlf_summary: Optional[TuflowTlfSummary]) -> List[Issue]:
-    """Check soil Initial Loss / Continuing Loss parameters."""
+    """Check soil Initial Loss / Continuing Loss parameters using generic ParameterChecker."""
     issues: List[Issue] = []
     if not tlf_summary:
         return issues
@@ -547,58 +481,23 @@ def _check_soil_ilcl(tlf_summary: Optional[TuflowTlfSummary]) -> List[Issue]:
     if not soils:
         return issues  # no IL/CL soils to check
 
-    il_values: List[float] = []
-    cl_values: List[float] = []
-    major_list: List[str] = []
-    critical_list: List[str] = []
+    # Check Initial Loss values
+    il_params = [
+        (soil.name, soil.initial_loss_mm, "Initial Loss (mm)")
+        for soil in soils
+        if soil.initial_loss_mm is not None
+    ]
+    if il_params:
+        issues.extend(SOIL_IL_CHECKER.check(il_params, source_file=tlf_summary.path))
 
-    for soil in soils:
-        label = f"{soil.name} (index {soil.index})"
-        il = soil.initial_loss_mm
-        cl = soil.continuing_loss_mm_per_hr
-
-        if il is not None:
-            il_values.append(il)
-            if il < 0:
-                critical_list.append(f"{label}: IL={il} mm (negative)")
-            elif il > IL_CRITICAL_THRESHOLD:
-                critical_list.append(f"{label}: IL={il} mm (> {IL_CRITICAL_THRESHOLD} mm)")
-            elif il > IL_MAJOR_THRESHOLD:
-                major_list.append(f"{label}: IL={il} mm (> {IL_MAJOR_THRESHOLD} mm)")
-
-        if cl is not None:
-            cl_values.append(cl)
-            if cl < 0:
-                critical_list.append(f"{label}: CL={cl} mm/hr (negative)")
-            elif cl > CL_CRITICAL_THRESHOLD:
-                critical_list.append(f"{label}: CL={cl} mm/hr (> {CL_CRITICAL_THRESHOLD} mm/hr)")
-            elif cl > CL_MAJOR_THRESHOLD:
-                major_list.append(f"{label}: CL={cl} mm/hr (> {CL_MAJOR_THRESHOLD} mm/hr)")
-
-    if critical_list:
-        issues.append(
-            _make_issue(
-                "ILCL01",
-                Severity.CRITICAL,
-                "SoilILCL",
-                "Soil IL/CL parameters have critical or non-physical values.",
-                suggestion="Check soil loss parameters and correct any non-physical or extreme values.",
-                file=tlf_summary.path,
-                details={"soils": critical_list},
-            )
-        )
-    elif major_list:
-        issues.append(
-            _make_issue(
-                "ILCL02",
-                Severity.MAJOR,
-                "SoilILCL",
-                "Soil IL/CL parameters have values outside recommended ranges.",
-                suggestion="Confirm that large IL/CL values are intentional and justified.",
-                file=tlf_summary.path,
-                details={"soils": major_list},
-            )
-        )
+    # Check Continuing Loss values
+    cl_params = [
+        (soil.name, soil.continuing_loss_mm_per_hr, "Continuing Loss (mm/hr)")
+        for soil in soils
+        if soil.continuing_loss_mm_per_hr is not None
+    ]
+    if cl_params:
+        issues.extend(SOIL_CL_CHECKER.check(cl_params, source_file=tlf_summary.path))
 
     return issues
 
