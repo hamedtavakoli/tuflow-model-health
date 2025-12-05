@@ -1,25 +1,122 @@
-from __future__ import annotations
+﻿"""
+TUFLOW Model QA/QC Pre-Run Validator
 
-from dataclasses import dataclass, field
-from enum import Enum
+A comprehensive validation tool for TUFLOW hydraulic models that checks:
+- Stage 0: Control file structure and dependencies
+- Stage 1: Input file references (GIS, databases)
+- Stage 2: TUFLOW test mode (-t) execution and log parsing
+- Stage 3: Time control, timestep, and parameter sanity checks
+"""
+
 from pathlib import Path
-from typing import List, Dict, Optional, Any, Set, Tuple
-import re
+from typing import List, Optional
 import sys
-import subprocess
-import csv
+
+from .config import DEFAULT_TUFLOW_EXE
+from .parsing import scan_all_inputs, find_wildcards_in_filename, build_wildcard_map_from_args
+from .tuflow_runner import run_tuflow_test_and_analyse
+from .parsing import parse_tlf_summary, parse_hpc_tlf_summary
+from .checks import run_time_and_timestep_checks, run_parameter_sanity_checks
+from .cli import print_validation_report, print_usage
 
 
-# ---------- Core types ----------
+def main(argv: List[str]) -> None:
+    """
+    CLI entry point.
 
-class Severity(str, Enum):
-    CRITICAL = "Critical"
-    MAJOR = "Major"
-    MINOR = "Minor"
+    Positional args:
+      1) TCF path
+      2+) wildcard args: -e1 00100Y -e2 0060m -s1 5m ...
+
+    Options:
+      --run-test         Run TUFLOW in test mode (-t) after static checks.
+      --tuflow-exe PATH  Path to the TUFLOW executable (overrides default).
+    """
+    if not argv:
+        print_usage()
+        raise SystemExit(1)
+
+    # Simple manual parsing for options:
+    run_test = False
+    tuflow_exe: Optional[Path] = None
+    positional: List[str] = []
+
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if token == "--run-test":
+            run_test = True
+            i += 1
+        elif token == "--tuflow-exe" and i + 1 < len(argv):
+            tuflow_exe = Path(argv[i + 1]).resolve()
+            i += 2
+        else:
+            positional.append(token)
+            i += 1
+
+    if not positional:
+        print("Error: No TCF path provided.\n")
+        print_usage()
+        raise SystemExit(1)
+
+    tcf_str = positional[0]
+    tcf_path = Path(tcf_str).resolve()
+
+    # Stage 0: find required wildcards from TCF filename
+    filename_wildcards = find_wildcards_in_filename(tcf_path)
+    # Build wildcard map from remaining positional args (wildcard args)
+    wildcard_args = positional[1:]
+    wildcard_map = build_wildcard_map_from_args(filename_wildcards, wildcard_args)
+
+    # Stage 1: scan control files & inputs
+    result = scan_all_inputs(tcf_path, wildcard_map)
+
+    # Print Stage 0 & 1 results
+    print_validation_report(result)
+
+    # Stage 2: optional TUFLOW run test (-t) and log parsing
+    if run_test:
+        exe_to_use = tuflow_exe or DEFAULT_TUFLOW_EXE
+        if not exe_to_use.exists():
+            print(
+                f"\n[ERROR] TUFLOW executable not found: {exe_to_use}\n"
+                "        Use --tuflow-exe to specify the correct path."
+            )
+            return
+
+        print(f"\nRunning TUFLOW test (-t) using: {exe_to_use}")
+        test_result = run_tuflow_test_and_analyse(
+            tcf_path=tcf_path,
+            wildcards=wildcard_map,
+            control_tree=result.control_tree,
+            tuflow_exe=exe_to_use,
+        )
+
+        # Stage 3: QA checks based on .tlf / .hpc.tlf (5.x and 6.x)
+        tlf_summary = parse_tlf_summary(test_result.logs.tlf)
+        hpc_summary = parse_hpc_tlf_summary(test_result.logs.hpc_tlf)
+
+        time_issues = run_time_and_timestep_checks(
+            tcf_path=tcf_path,
+            tlf_summary=tlf_summary,
+            hpc_summary=hpc_summary,
+            test_result=test_result,
+        )
+
+        param_issues = run_parameter_sanity_checks(
+            tlf_summary=tlf_summary,
+            hpc_summary=hpc_summary,
+        )
+
+        all_issues = time_issues + param_issues
+
+        # Print all results
+        print_validation_report(result, test_result, all_issues)
 
 
-@dataclass
-class Issue:
+if __name__ == "__main__":
+    main(sys.argv[1:])
+
     id: str
     severity: Severity
     category: str
