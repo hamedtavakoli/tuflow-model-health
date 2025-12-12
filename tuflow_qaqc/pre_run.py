@@ -65,11 +65,11 @@ def main(argv: Optional[List[str]] = None) -> None:
         help="Path to TUFLOW executable (e.g., TUFLOW_iSP_w64.exe) [default: TUFLOW_iSP_w64.exe]",
     )
 
-    # Wildcard arguments (catch-all remaining args)
+    # Wildcard arguments (catch-all remaining args in key=value format)
     parser.add_argument(
         "wildcards",
         nargs="*",
-        help="Wildcard arguments for parameterized models (e.g., -e1 VALUE -e2 VALUE -s1 VALUE ...)",
+        help="Wildcard arguments for parameterized models (e.g., e1=VALUE e2=VALUE s1=VALUE or use -- -e1 VALUE -e2 VALUE after flags)",
     )
 
     # Parse arguments
@@ -80,6 +80,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     run_test: bool = args.run_test
     tuflow_exe: Optional[Path] = args.tuflow_exe.resolve() if args.tuflow_exe else None
     wildcard_args: List[str] = args.wildcards
+    
+    # Handle wildcard args in -key value format (convert to list for build_wildcard_map_from_args)
+    # This function already handles both formats
 
     # Stage 0: find required wildcards from TCF filename
     filename_wildcards = find_wildcards_in_filename(tcf_path)
