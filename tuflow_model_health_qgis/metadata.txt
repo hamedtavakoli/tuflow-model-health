@@ -1,0 +1,9 @@
+[general]
+name=TUFLOW Model Health QAQC
+qgisMinimumVersion=3.16
+version=0.1.0
+author=Hamed Tavakolifar
+email=
+description=Staged QA/QC checks for TUFLOW models (control parsing, input scan, optional TUFLOW test, log QA)
+about=Wraps tuflow_qaqc CLI into a QGIS dock widget.
+category=Hydrology
