@@ -1,14 +1,9 @@
 [general]
-name=TUFLOW Model Health QA/QC
-description=Dockable GUI for the TUFLOW QA/QC pre-run pipeline.
-about=Run staged control-file scans and optional TUFLOW test mode from within QGIS.
-version=0.1.0
+name=TUFLOW Model Health QAQC
 qgisMinimumVersion=3.16
-qgisMaximumVersion=3.99
-author=Model Health Tools
-email=info@example.com
-category=Analysis
-tracker=https://example.com/issues
-homepage=https://example.com
-icon=
-experimental=True
+version=0.1.0
+author=Hamed Tavakolifar
+email=
+description=Staged QA/QC checks for TUFLOW models (control parsing, input scan, optional TUFLOW test, log QA)
+about=Wraps tuflow_qaqc CLI into a QGIS dock widget.
+category=Hydrology
