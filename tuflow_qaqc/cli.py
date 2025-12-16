@@ -24,20 +24,46 @@ def _print_control_tree(tree: ControlTree) -> None:
     recurse(tree.root_tcf)
 
 
-def _print_input_scan(result: InputScanResult) -> None:
-    """Print input files found during scan."""
-    print("\nInput files (GIS & Databases):")
-    if not result.inputs:
-        print("  (none found)")
+def _print_input_group(title: str, items: list[tuple[str, str]]) -> None:
+    print(f"  {title}:")
+    if not items:
+        print("    (none)")
         return
+    for status_tag, line in items:
+        print(f"    {status_tag} {line}")
+
+
+def _print_input_scan(result: InputScanResult) -> None:
+    """Print input files found during scan, grouped by type."""
+    print("\nInput files:")
+
+    control_items: list[tuple[str, str]] = []
+    for path in sorted(result.control_tree.all_files):
+        exists = path.exists()
+        status_tag = "[OK]     " if exists else "[MISSING]"
+        control_items.append((status_tag, f"control   {path}"))
+
+    gis_items: list[tuple[str, str]] = []
+    db_items: list[tuple[str, str]] = []
+    other_items: list[tuple[str, str]] = []
 
     for inp in sorted(result.inputs, key=lambda x: (x.kind, str(x.path))):
-        status = "OK" if inp.exists else "MISSING"
         status_tag = "[OK]     " if inp.exists else "[MISSING]"
-        print(
-            f"  {status_tag} {inp.kind:9s} {inp.path} "
+        line = (
+            f"{inp.kind:9s} {inp.path} "
             f"(from {inp.from_control.name}, line {inp.line})"
         )
+        if inp.kind == "gis":
+            gis_items.append((status_tag, line))
+        elif inp.kind == "database":
+            db_items.append((status_tag, line))
+        else:
+            other_items.append((status_tag, line))
+
+    _print_input_group("Control files", control_items)
+    _print_input_group("GIS layers", gis_items)
+    _print_input_group("Databases", db_items)
+    _print_input_group("Other inputs", other_items)
 
 
 def print_validation_report(

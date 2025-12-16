@@ -59,9 +59,10 @@ class ControlTree:
 
 @dataclass
 class InputRef:
-    """Reference to an input GIS or database file."""
+    """Reference to an input file discovered in control directives."""
+
     path: Path
-    kind: str  # "gis" or "database" or "other"
+    kind: str  # "gis", "database", "soil", or "other"
     from_control: Path
     line: int
     exists: bool

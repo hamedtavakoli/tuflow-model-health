@@ -290,16 +290,6 @@ def _scan_inputs_in_control_file(
             kind = _categorise_input_path(p, key)
             ext = p.suffix.lower()
 
-            keep = (
-                kind in {"gis", "database", "soil"}
-                or is_known_input_key
-                or ext in SOIL_EXTS
-            )
-
-            if not keep:
-                _log(f"{path}:{i}: token '{cleaned}' skipped (unrecognised kind '{kind}')")
-                continue
-
             exists = p.exists()
             inputs.append(
                 InputRef(
