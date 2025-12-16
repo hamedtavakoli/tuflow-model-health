@@ -19,7 +19,12 @@ from .checks import run_parameter_sanity_checks, run_time_and_timestep_checks
 from .cli import print_validation_report
 from .config import DEFAULT_TUFLOW_EXE
 from .core import Issue, ModelNode, Severity, TuflowTestResult
-from .parsing import parse_hpc_tlf_summary, parse_tlf_summary, scan_all_inputs
+from .parsing import (
+    group_inputs_by_category,
+    parse_hpc_tlf_summary,
+    parse_tlf_summary,
+    scan_all_inputs,
+)
 from .tuflow_runner import run_tuflow_test_and_analyse
 
 
@@ -40,6 +45,7 @@ class RunResult:
     timings: Dict[str, float] = field(default_factory=dict)
     input_scan: Optional[object] = None
     model_tree: Optional[ModelNode] = None
+    files_grouped: Dict[str, List[ModelNode]] = field(default_factory=dict)
     test_result: Optional[TuflowTestResult] = None
     qa_issues: List[Issue] = field(default_factory=list)
     debug_log: List[str] = field(default_factory=list)
@@ -68,22 +74,35 @@ def _render_model_node(node: ModelNode, *, open_branch: bool = True) -> str:
     """Render a ModelNode (and its children) as nested HTML lists."""
 
     label = html.escape(node.name)
-    title_attr = f" title=\"Referenced from {html.escape(node.source_control)}\"" if node.source_control else ""
+    title_attr = (
+        f" title=\"Referenced from {html.escape(node.source_control)}\""
+        if node.source_control
+        else ""
+    )
+
+    exists_prefix = "✅ " if node.exists or node.path is None else "❌ "
 
     if node.path:
         href = node.path.as_uri()
         label = f'<a href="{href}">{label}</a>'
         if not node.exists:
-            label = f'<span style="color:#b00020;">⚠️ {label} (missing)</span>'
+            label = f'<span style=\"color:#b00020;\">{label} (missing)</span>'
+
+    label = exists_prefix + label
 
     if node.children:
         count = _count_leaf_nodes(node)
         summary = f"📁 {label}"
         if count:
             summary += f" ({count})"
-        children_html = "".join(_render_model_node(ch, open_branch=False) for ch in node.children)
+        children_html = "".join(
+            _render_model_node(ch, open_branch=False) for ch in node.children
+        )
         open_attr = " open" if open_branch else ""
-        return f"<details{open_attr}{title_attr}><summary>{summary}</summary><ul>{children_html}</ul></details>"
+        return (
+            f"<details{open_attr}{title_attr}>"
+            f"<summary>{summary}</summary><ul>{children_html}</ul></details>"
+        )
 
     return f"<li{title_attr}>{label}</li>"
 
@@ -96,13 +115,13 @@ def _render_model_tree(model_tree: Optional[ModelNode]) -> str:
     return f"<h3>Model Structure</h3><div>{children_html}</div>"
 
 
-def _build_html_report(
-    run_text: str,
-    findings: List[Issue],
-    missing_inputs: List[str],
-    model_tree: Optional[ModelNode],
-) -> str:
-    """Convert the plain-text report to a structured HTML representation."""
+def render_html_report(result: RunResult) -> str:
+    """Convert a RunResult to a structured HTML representation."""
+
+    run_text = result.report_text
+    findings = result.findings
+    missing_inputs = result.inputs_missing
+    model_tree = result.model_tree
 
     def _count_by_severity(level: Severity) -> int:
         return sum(1 for f in findings if f.severity == level)
@@ -191,16 +210,29 @@ def run_qaqc(
                 f"\n[ERROR] TUFLOW executable not found: {exe_path}\n"
                 "        Use --tuflow-exe to specify the correct path.\n"
             )
-            html_report = (
-                _build_html_report(
-                    text_report,
-                    scan_result.control_tree.issues,
-                    [],
-                    scan_result.model_tree,
+            grouped = {
+                cat.value: nodes
+                for cat, nodes in group_inputs_by_category(scan_result.inputs).items()
+            }
+            html_report = None
+            if output_format == "html":
+                temp_result = RunResult(
+                    ok=False,
+                    report_text=text_report,
+                    report_html=None,
+                    findings=list(scan_result.control_tree.issues),
+                    inputs_missing=[
+                        str(inp.path) for inp in scan_result.inputs if not inp.exists
+                    ],
+                    logs_used=[],
+                    timings=timings,
+                    input_scan=scan_result,
+                    model_tree=scan_result.model_tree,
+                    files_grouped=grouped,
+                    test_result=None,
+                    qa_issues=[],
                 )
-                if output_format == "html"
-                else None
-            )
+                html_report = render_html_report(temp_result)
             return RunResult(
                 ok=False,
                 report_text=text_report,
@@ -211,6 +243,7 @@ def run_qaqc(
                 timings=timings,
                 input_scan=scan_result,
                 model_tree=scan_result.model_tree,
+                files_grouped=grouped,
                 test_result=None,
                 qa_issues=[],
             )
@@ -255,12 +288,28 @@ def run_qaqc(
     text_report = _generate_text_report(scan_result, test_result, qa_issues)
 
     html_report = None
+    grouped = {
+        cat.value: nodes for cat, nodes in group_inputs_by_category(scan_result.inputs).items()
+    }
     if output_format == "html":
         missing_inputs = [str(inp.path) for inp in scan_result.inputs if not inp.exists]
         findings: List[Issue] = list(scan_result.control_tree.issues) + list(qa_issues)
-        html_report = _build_html_report(
-            text_report, findings, missing_inputs, scan_result.model_tree
+        temp_result = RunResult(
+            ok=True,
+            report_text=text_report,
+            report_html=None,
+            findings=findings,
+            inputs_missing=missing_inputs,
+            logs_used=[],
+            timings=timings,
+            input_scan=scan_result,
+            model_tree=scan_result.model_tree,
+            files_grouped=grouped,
+            test_result=test_result,
+            qa_issues=qa_issues,
+            debug_log=scan_result.debug_log,
         )
+        html_report = render_html_report(temp_result)
 
     ok = True
     if run_test and test_result and test_result.return_code not in (0, None):
@@ -292,10 +341,11 @@ def run_qaqc(
         timings=timings,
         input_scan=scan_result,
         model_tree=scan_result.model_tree,
+        files_grouped=grouped,
         test_result=test_result,
         qa_issues=qa_issues,
         debug_log=scan_result.debug_log,
     )
 
 
-__all__ = ["run_qaqc", "RunResult", "Finding"]
+__all__ = ["run_qaqc", "RunResult", "Finding", "render_html_report"]

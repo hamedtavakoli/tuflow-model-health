@@ -3,7 +3,7 @@
 import json
 import traceback
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from qgis.PyQt.QtCore import Qt, QSettings, QUrl, pyqtSignal
 from qgis.PyQt.QtGui import QDesktopServices, QStandardItem, QStandardItemModel
@@ -17,6 +17,7 @@ from qgis.PyQt.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -29,7 +30,7 @@ from qgis.PyQt.QtWidgets import (
 )
 from qgis.core import QgsApplication, QgsMessageLog, QgsTask, Qgis
 
-from tuflow_qaqc.api import RunResult, run_qaqc
+from tuflow_qaqc.api import RunResult, render_html_report, run_qaqc
 from tuflow_qaqc.parsing import find_wildcards_in_filename
 from tuflow_qaqc.core import Severity
 from tuflow_qaqc.wildcards import validate_wildcards
@@ -225,9 +226,14 @@ class TuflowModelHealthDockWidget(QDockWidget):
         v.addWidget(self.summary_label)
 
         self.model_tree_view = QTreeView()
-        self.model_tree_view.setHeaderHidden(True)
+        self.model_tree_view.setObjectName("model_tree_view")
+        self.model_tree_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.model_tree_view.customContextMenuRequested.connect(
+            self._show_tree_context_menu
+        )
+        self.model_tree_view.setHeaderHidden(False)
         self.model_tree_view.setExpandsOnDoubleClick(True)
-        self.model_tree_view.clicked.connect(self._on_tree_clicked)
+        self.model_tree_view.doubleClicked.connect(self._on_tree_activated)
         self._set_empty_tree_model()
 
         v.addWidget(QLabel("Model structure:"))
@@ -257,50 +263,72 @@ class TuflowModelHealthDockWidget(QDockWidget):
 
     def _set_empty_tree_model(self) -> None:
         model = QStandardItemModel()
-        model.setHorizontalHeaderLabels(["Model structure"])
+        model.setHorizontalHeaderLabels(["Name", "Type", "Exists", "Path"])
         self.model_tree_view.setModel(model)
+        self.model_tree_view.setColumnHidden(3, True)
 
-    def _build_tree_item(self, node) -> QStandardItem:
+    def _build_tree_row(self, node) -> List[QStandardItem]:
         label = node.name
         if node.path and not node.exists:
             label = f"⚠️ {label} (missing)"
-        item = QStandardItem(label)
-        item.setEditable(False)
+
+        name_item = QStandardItem(label)
+        type_item = QStandardItem(node.category.value if node.category else "")
+        exists_text = "✅" if node.exists or node.path is None else "❌"
+        exists_item = QStandardItem(exists_text)
+        path_item = QStandardItem(str(node.path) if node.path else "")
+
+        for itm in (name_item, type_item, exists_item, path_item):
+            itm.setEditable(False)
 
         tooltip_parts = []
         if node.path:
             tooltip_parts.append(str(node.path))
-            item.setData(str(node.path), TREE_PATH_ROLE)
+            name_item.setData(str(node.path), TREE_PATH_ROLE)
         if node.source_control:
             tooltip_parts.append(f"from {node.source_control}")
         if tooltip_parts:
-            item.setToolTip(" | ".join(tooltip_parts))
+            name_item.setToolTip(" | ".join(tooltip_parts))
 
         for child in node.children:
-            item.appendRow(self._build_tree_item(child))
+            name_item.appendRow(self._build_tree_row(child))
 
-        return item
+        return [name_item, type_item, exists_item, path_item]
 
     def _populate_model_tree(self, model_tree) -> None:
         if not hasattr(self, "model_tree_view"):
             return
 
         model = QStandardItemModel()
-        model.setHorizontalHeaderLabels(["Model structure"])
+        model.setHorizontalHeaderLabels(["Name", "Type", "Exists", "Path"])
 
         root_item = model.invisibleRootItem()
         if model_tree:
             for child in model_tree.children:
-                root_item.appendRow(self._build_tree_item(child))
+                root_item.appendRow(self._build_tree_row(child))
 
         self.model_tree_view.setModel(model)
+        self.model_tree_view.setColumnHidden(3, True)
         self.model_tree_view.expandAll()
 
-    def _on_tree_clicked(self, index) -> None:
-        path = index.data(TREE_PATH_ROLE)
+    def _on_tree_activated(self, index) -> None:
+        path = index.sibling(index.row(), 0).data(TREE_PATH_ROLE)
         if not path:
             return
         self._open_file_location(Path(path))
+
+    def _show_tree_context_menu(self, point) -> None:
+        index = self.model_tree_view.indexAt(point)
+        if not index.isValid():
+            return
+        path = index.sibling(index.row(), 0).data(TREE_PATH_ROLE)
+        if not path:
+            return
+
+        menu = QMenu(self.model_tree_view)
+        action = menu.addAction("Open containing folder")
+        action.triggered.connect(lambda: self._open_file_location(Path(path)))
+        menu.exec_(self.model_tree_view.viewport().mapToGlobal(point))
 
     def _open_file_location(self, path: Path) -> None:
         target = path if path.is_dir() else path.parent
@@ -482,10 +510,8 @@ class TuflowModelHealthDockWidget(QDockWidget):
 
         self._populate_model_tree(getattr(result, "model_tree", None))
 
-        if result.report_html:
-            self.report_view.setHtml(result.report_html)
-        else:
-            self.report_view.setPlainText(result.report_text)
+        html_report = result.report_html or render_html_report(result)
+        self.report_view.setHtml(html_report)
 
         for btn in (self.export_html_btn, self.export_txt_btn, self.export_json_btn):
             btn.setEnabled(True)
@@ -499,9 +525,7 @@ class TuflowModelHealthDockWidget(QDockWidget):
             self, "Export HTML", str(Path(default_dir) / "tuflow_qaqc_report.html"), "HTML (*.html)"
         )
         if path:
-            content = self._last_result.report_html or (
-                "<pre>" + self._last_result.report_text + "</pre>"
-            )
+            content = self._last_result.report_html or render_html_report(self._last_result)
             Path(path).write_text(content, encoding="utf-8")
 
     def _export_txt(self) -> None:
