@@ -41,6 +41,7 @@ class RunResult:
     input_scan: Optional[object] = None
     test_result: Optional[TuflowTestResult] = None
     qa_issues: List[Issue] = field(default_factory=list)
+    debug_log: List[str] = field(default_factory=list)
 
 
 def _generate_text_report(
@@ -96,6 +97,7 @@ def run_qaqc(
     output_format: str = "html",
     progress_callback: Optional[Callable[[float, str], None]] = None,
     cancel_callback: Optional[Callable[[], bool]] = None,
+    debug: bool = False,
 ) -> RunResult:
     """
     Run the QA/QC pipeline programmatically.
@@ -119,7 +121,7 @@ def run_qaqc(
 
     # Stage 0 + 1: control parsing + input scan
     s0_start = time.perf_counter()
-    scan_result = scan_all_inputs(tcf, wildcard_map)
+    scan_result = scan_all_inputs(tcf, wildcard_map, debug=debug)
     timings["scan"] = time.perf_counter() - s0_start
 
     if progress_callback:
@@ -233,6 +235,7 @@ def run_qaqc(
         input_scan=scan_result,
         test_result=test_result,
         qa_issues=qa_issues,
+        debug_log=scan_result.debug_log,
     )
 
 

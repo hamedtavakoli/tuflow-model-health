@@ -13,7 +13,11 @@ from typing import Set, Dict, Literal
 CONTROL_EXTS: Set[str] = {
     ".tcf", ".tgc", ".tbc", ".ecf",
     ".qcf", ".tef", ".toc", ".trfc",
-    ".adcf", ".tsoilf",
+    ".adcf",
+}
+
+SOIL_EXTS: Set[str] = {
+    ".tsoilf",
 }
 
 GIS_EXTS: Set[str] = {
@@ -35,9 +39,13 @@ CONTROL_KEY_HINTS: Set[str] = {
     "Event File",
     "Rainfall Control",
     "Operations Control",
-    "Soils File",
     "Advection Dispersion Control",
     "Read File",  # generic include
+}
+
+INPUT_KEY_HINTS: Set[str] = {
+    "Read Soils File",
+    "Soils File",
 }
 
 # ---- Regex patterns ----
@@ -54,7 +62,7 @@ DIRECTIVE_RE = re.compile(
     re.VERBOSE,
 )
 
-INLINE_COMMENT_SPLIT_RE = re.compile(r"(!|//|#)")
+INLINE_COMMENT_SPLIT_RE = re.compile(r"(!|//|#|;)")
 WILDCARD_RE = re.compile(r"~(?P<var>[A-Za-z0-9_]+)~")
 FLOAT_RE = re.compile(r"[-+]?\d*\.?\d+(?:[Ee][-+]?\d+)?")
 
