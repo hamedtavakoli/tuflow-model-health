@@ -26,7 +26,7 @@ GIS_EXTS: Set[str] = {
 }
 
 DB_EXTS: Set[str] = {
-    ".csv", ".txt", ".dat", ".dbf",
+    ".csv", ".txt", ".dat", ".dbf", ".sqlite",
 }
 
 # ---- Control file keywords ----

@@ -86,6 +86,7 @@ class InputRef:
     from_control: Path
     line: int
     exists: bool
+    layer: Optional[str] = None
 
 
 @dataclass
