@@ -1,5 +1,7 @@
 """QGIS plugin entry point for the TUFLOW Model Health QA/QC dock widget."""
 
+import os
+
 from qgis.PyQt.QtWidgets import QAction
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtCore import Qt
@@ -17,8 +19,13 @@ class TuflowModelHealthPlugin:
         self.dock = None
 
     def initGui(self):
+        icon_path = os.path.join(
+            os.path.dirname(__file__), "icons", "tuflow_model_health.png"
+        )
+        icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
+
         self.action = QAction(
-            QIcon(), "TUFLOW Model Health QA/QC", self.iface.mainWindow()
+            icon, "TUFLOW Model Health QA/QC", self.iface.mainWindow()
         )
         self.action.setToolTip("Open the TUFLOW QA/QC panel")
         self.action.triggered.connect(self.show_dock)
