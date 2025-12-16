@@ -369,7 +369,7 @@ def _build_control_node(
     return node
 
 
-def _group_inputs_by_category(inputs: List[InputRef]) -> Dict[InputCategory, List[ModelNode]]:
+def group_inputs_by_category(inputs: List[InputRef]) -> Dict[InputCategory, List[ModelNode]]:
     """Convert InputRef objects into ModelNode leaves grouped by category."""
 
     grouped: Dict[InputCategory, List[ModelNode]] = {
@@ -408,7 +408,7 @@ def build_model_tree(control_tree: ControlTree, inputs: List[InputRef]) -> Model
         _build_control_node(control_tree.root_tcf, control_tree.edges)
     )
 
-    grouped_inputs = _group_inputs_by_category(inputs)
+    grouped_inputs = group_inputs_by_category(inputs)
 
     def _category_node(title: str, cat: InputCategory) -> ModelNode:
         return ModelNode(name=title, path=None, category=cat)
