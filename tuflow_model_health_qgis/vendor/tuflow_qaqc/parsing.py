@@ -5,12 +5,29 @@ Parsing utilities for TUFLOW control files and log files.
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 import csv
+import re
 
 from .config import (
-    COMMENT_RE, DIRECTIVE_RE, INLINE_COMMENT_SPLIT_RE, WILDCARD_RE,
-    FLOAT_RE, CONTROL_EXTS, GIS_EXTS, DB_EXTS, CONTROL_KEY_HINTS,
-    INPUT_KEY_HINTS, SOIL_EXTS
+    COMMENT_RE,
+    DIRECTIVE_RE,
+    INLINE_COMMENT_SPLIT_RE,
+    WILDCARD_RE,
+    FLOAT_RE,
+    CONTROL_EXTS,
+    GIS_EXTS,
+    DB_EXTS,
+    SOIL_EXTS,
+    INPUT_EXTS,
+    CONTROL_DIRECTIVES,
+    INPUT_DIRECTIVES,
+    GIS_DIRECTIVES,
+    DATABASE_DIRECTIVES,
+    NON_FILE_DIRECTIVES,
+    ALL_KNOWN_FILE_EXTS,
 )
+
+
+NUMERIC_WITH_UNIT_RE = re.compile(r"^[-+]?\d*\.?\d+(?:[Ee][-+]?\d+)?[a-zA-Z]+$")
 from .core import (
     ControlDirective,
     ControlFile,
@@ -41,34 +58,99 @@ def _strip_quotes(text: str) -> str:
     return text.strip().strip('"').strip("'")
 
 
-def looks_like_file_path(text: str) -> bool:
-    """Heuristic check that a token looks like a real filename with extension."""
+def _normalise_directive(key: str) -> str:
+    """Lower-case and collapse whitespace in directive keywords for matching."""
 
-    cleaned = _strip_inline_comment(text).strip()
-    cleaned = _strip_quotes(cleaned)
+    return " ".join(key.lower().split())
+
+
+def _file_token_status(text: str) -> Tuple[bool, str]:
+    """Validate whether a token should be treated as a file path."""
+
+    cleaned = _strip_quotes(_strip_inline_comment(text).strip())
 
     if "|" in cleaned:
         cleaned = cleaned.split("|", maxsplit=1)[0].strip()
 
     if not cleaned:
-        return False
+        return False, "empty token"
 
     lower = cleaned.lower()
-    if lower in {"on", "off"}:
-        return False
+    if lower in {"on", "off", "true", "false"}:
+        return False, "boolean flag"
 
-    # Reject pure numbers
     if FLOAT_RE.fullmatch(cleaned):
-        return False
+        return False, "pure number"
 
-    p = Path(cleaned)
-    if not p.suffix:
-        return False
+    if NUMERIC_WITH_UNIT_RE.fullmatch(cleaned):
+        return False, "numeric with unit"
 
-    if not p.stem:
-        return False
+    has_path_sep = "/" in cleaned or "\\" in cleaned
+    has_drive = cleaned.startswith("\\\\") or (
+        len(cleaned) > 2 and cleaned[1] == ":" and cleaned[0].isalpha()
+    )
+    has_known_ext = any(cleaned.lower().endswith(ext) for ext in ALL_KNOWN_FILE_EXTS)
 
-    return True
+    if has_path_sep or has_drive or has_known_ext:
+        return True, ""
+
+    return False, "no recognised path pattern or extension"
+
+
+def looks_like_file_path(text: str) -> bool:
+    """Check that a token looks like a real filename with extension or path."""
+
+    ok, _ = _file_token_status(text)
+    return ok
+
+
+def _tokenise_value(value: str) -> List[Tuple[str, Optional[str]]]:
+    """Split a directive value into (path, layer) tuples."""
+
+    tokens: List[Tuple[str, Optional[str]]] = []
+    raw_tokens = [t for t in re.split(r"[\s,;]+", value) if t]
+
+    idx = 0
+    while idx < len(raw_tokens):
+        tok = raw_tokens[idx]
+        layer: Optional[str] = None
+
+        if "|" in tok and tok != "|":
+            file_part, layer_part = tok.split("|", maxsplit=1)
+            tok = file_part
+            layer = _strip_quotes(layer_part.strip()) or None
+            idx += 1
+        elif idx + 1 < len(raw_tokens) and raw_tokens[idx + 1] == "|":
+            if idx + 2 < len(raw_tokens):
+                layer = _strip_quotes(raw_tokens[idx + 2].strip()) or None
+                idx += 3
+            else:
+                idx += 2
+        elif idx + 1 < len(raw_tokens) and raw_tokens[idx + 1].startswith("|"):
+            layer = _strip_quotes(raw_tokens[idx + 1][1:].strip()) or None
+            idx += 2
+        else:
+            idx += 1
+
+        cleaned = _strip_quotes(tok.strip())
+        if cleaned:
+            tokens.append((cleaned, layer))
+
+    return tokens
+
+
+def _classify_directive(key_norm: str) -> Optional[InputCategory]:
+    """Return the InputCategory for a directive, if recognised."""
+
+    if key_norm in CONTROL_DIRECTIVES:
+        return InputCategory.CONTROL
+    if key_norm in GIS_DIRECTIVES:
+        return InputCategory.GIS
+    if key_norm in DATABASE_DIRECTIVES:
+        return InputCategory.DATABASE
+    if key_norm in INPUT_DIRECTIVES:
+        return InputCategory.INPUT
+    return None
 
 
 def parse_control_file(path: Path) -> ControlFile:
@@ -158,25 +240,26 @@ def _collect_control_children(
     From a parsed control file, find all referenced control files,
     substituting wildcards in the values.
     """
-    import re
     children: List[Path] = []
     base_dir = cf.path.parent
 
     for d in cf.directives:
-        key = d.keyword.strip()
-        if not any(h.lower() in key.lower() for h in CONTROL_KEY_HINTS):
-            # Not a known control-file directive; skip
+        key_norm = _normalise_directive(d.keyword)
+        if key_norm in NON_FILE_DIRECTIVES:
+            continue
+        if key_norm not in CONTROL_DIRECTIVES:
             continue
 
-        # Substitute wildcards in the value (path)
         value = substitute_wildcards(d.value, wildcards)
+        value_cleaned = _strip_inline_comment(value).strip()
 
-        # Simple token split: allow for multiple filenames in one line
-        tokens = re.split(r"[\s,;]+", value.strip('"').strip("'"))
-        for tok in tokens:
-            if not tok:
+        for tok, _ in _tokenise_value(value_cleaned):
+            ok, _reason = _file_token_status(tok)
+            if not ok:
                 continue
-            p = (base_dir / tok).resolve()
+
+            normalised = tok.replace("\\", "/")
+            p = (base_dir / normalised).resolve()
             if is_control_file_path(p):
                 children.append(p)
 
@@ -249,33 +332,6 @@ def build_control_tree(
     )
 
 
-# ---- Input scanning ----
-
-def _categorise_input_path(p: Path, keyword: str) -> InputCategory:
-    """Categorise an input file for reporting purposes."""
-    ext = p.suffix.lower()
-    key_lower = keyword.lower()
-
-    if ext in CONTROL_EXTS:
-        return InputCategory.CONTROL
-
-    if ext in SOIL_EXTS:
-        return InputCategory.INPUT
-
-    if ext in GIS_EXTS:
-        if ext == ".gpkg" and "database" in key_lower:
-            return InputCategory.DATABASE
-        return InputCategory.GIS
-
-    if ext in DB_EXTS:
-        return InputCategory.DATABASE
-
-    if ext == ".gpkg" and "database" in key_lower:
-        return InputCategory.DATABASE
-
-    return InputCategory.INPUT
-
-
 def _scan_inputs_in_control_file(
     path: Path,
     wildcards: Dict[str, str],
@@ -284,7 +340,6 @@ def _scan_inputs_in_control_file(
     debug_log: List[str],
 ) -> List[InputRef]:
     """Scan a single control file for input file references (GIS, CSV, soils, etc.)."""
-    import re
     inputs: List[InputRef] = []
     ignored_non_files = 0
 
@@ -316,56 +371,39 @@ def _scan_inputs_in_control_file(
 
         key = m.group("key").strip()
         val_raw = m.group("value").strip()
-        key_lower = key.lower()
+        key_norm = _normalise_directive(key)
+
+        if key_norm in NON_FILE_DIRECTIVES:
+            _log(f"{path}:{i}: directive '{key}' ignored (non-file directive)")
+            continue
+
+        directive_category = _classify_directive(key_norm)
+        if directive_category is None:
+            _log(f"{path}:{i}: unrecognised directive '{key}' -> skipped")
+            continue
 
         # Substitute wildcards in the value
         val = substitute_wildcards(val_raw, wildcards)
+        value_cleaned = _strip_inline_comment(val).strip()
 
-        raw_tokens = [t for t in re.split(r"[\s,;]+", val) if t]
-        _log(f"{path}:{i}: directive '{key}' -> tokens {raw_tokens}")
+        token_pairs = _tokenise_value(value_cleaned)
+        _log(f"{path}:{i}: directive '{key}' -> tokens {token_pairs}")
 
-        idx = 0
-        while idx < len(raw_tokens):
-            tok = raw_tokens[idx]
-            layer: Optional[str] = None
-
-            if "|" in tok and tok != "|":
-                file_part, layer_part = tok.split("|", maxsplit=1)
-                tok = file_part
-                layer = _strip_quotes(layer_part.strip()) or None
-                idx += 1
-            elif idx + 1 < len(raw_tokens) and raw_tokens[idx + 1] == "|":
-                if idx + 2 < len(raw_tokens):
-                    layer = _strip_quotes(raw_tokens[idx + 2].strip()) or None
-                    idx += 3
-                else:
-                    idx += 2
-            elif idx + 1 < len(raw_tokens) and raw_tokens[idx + 1].startswith("|"):
-                layer = _strip_quotes(raw_tokens[idx + 1][1:].strip()) or None
-                idx += 2
-            else:
-                idx += 1
-
-            cleaned = _strip_quotes(tok.strip())
-            if "|" in cleaned:
-                cleaned = cleaned.split("|", maxsplit=1)[0].strip()
-
-            if not looks_like_file_path(cleaned):
+        for tok, layer in token_pairs:
+            ok, reason = _file_token_status(tok)
+            if not ok:
                 ignored_non_files += 1
-                _log(
-                    f"{path}:{i}: ignored token '{tok}' (layer={layer}) - does not look like a file"
-                )
+                _log(f"{path}:{i}: ignored token '{tok}' (layer={layer}) - {reason}")
                 continue
 
-            normalised = cleaned.replace("\\", "/")
+            normalised = tok.replace("\\", "/")
             p = (base_dir / normalised).resolve()
-            category = _categorise_input_path(p, key)
 
             exists = p.exists()
             inputs.append(
                 InputRef(
                     path=p,
-                    category=category,
+                    category=directive_category,
                     from_control=path,
                     line=i,
                     exists=exists,
@@ -373,7 +411,7 @@ def _scan_inputs_in_control_file(
                 )
             )
             _log(
-                f"{path}:{i}: matched '{key}' -> {p} (exists={exists}, kind={category}, layer={layer})"
+                f"{path}:{i}: matched '{key}' -> {p} (exists={exists}, kind={directive_category}, layer={layer})"
             )
 
     if ignored_non_files:
@@ -394,7 +432,7 @@ def scan_all_inputs(
     """
     control_tree = build_control_tree(tcf_path, wildcards)
     debug_log: List[str] = []
-    seen_paths: set[tuple[Path, str]] = set()
+    seen_paths: set[Tuple[Path, InputCategory, Optional[str]]] = set()
     all_inputs: List[InputRef] = []
 
     for cf_path in control_tree.all_files:

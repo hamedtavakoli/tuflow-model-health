@@ -16,9 +16,12 @@ CONTROL_EXTS: Set[str] = {
     ".adcf",
 }
 
+INPUT_EXTS: Set[str] = set()
+
 SOIL_EXTS: Set[str] = {
     ".tsoilf",
 }
+INPUT_EXTS |= SOIL_EXTS
 
 GIS_EXTS: Set[str] = {
     ".shp", ".tab", ".mif", ".mid", ".gpkg", ".gdb",
@@ -29,23 +32,70 @@ DB_EXTS: Set[str] = {
     ".csv", ".txt", ".dat", ".dbf", ".sqlite",
 }
 
-# ---- Control file keywords ----
+ALL_KNOWN_FILE_EXTS: Set[str] = set()
+ALL_KNOWN_FILE_EXTS |= CONTROL_EXTS
+ALL_KNOWN_FILE_EXTS |= INPUT_EXTS
+ALL_KNOWN_FILE_EXTS |= GIS_EXTS
+ALL_KNOWN_FILE_EXTS |= DB_EXTS
 
-CONTROL_KEY_HINTS: Set[str] = {
-    "Geometry Control",
-    "BC Control",
-    "ESTRY Control",
-    "Quadtree Control",
-    "Event File",
-    "Rainfall Control",
-    "Operations Control",
-    "Advection Dispersion Control",
-    "Read File",  # generic include
+# ---- Directive allow/deny lists ----
+
+# These allow-lists mirror TUFLOW documentation. They must be explicit; no
+# inference from unknown directives is allowed. Keep entries lower-cased and
+# whitespace-normalised for matching.
+
+CONTROL_DIRECTIVES: Set[str] = {
+    "read file",
+    "geometry control file",
+    "bc control file",
+    "event control file",
+    "quadtree control file",
+    "estry control file",
+    "structure control file",
 }
 
-INPUT_KEY_HINTS: Set[str] = {
-    "Read Soils File",
-    "Soils File",
+INPUT_DIRECTIVES: Set[str] = {
+    "soils file",
+    "infiltration file",
+    "losses file",
+    "rainfall file",
+    "read rainfall",
+    "inflow file",
+    "restart file",
+    "initial conditions file",
+    "read materials file",
+    "read table",
+    "read soils file",
+}
+
+GIS_DIRECTIVES: Set[str] = {
+    "read gis",
+    "read gis z shape",
+    "read bc gis",
+    "read grid",
+    "read dem",
+    "read asc",
+    "read tif",
+    "read gis materials",
+    "read gis roughness",
+}
+
+DATABASE_DIRECTIVES: Set[str] = {
+    "bc database",
+    "read bc database",
+    "read structure database",
+    "read attribute database",
+}
+
+NON_FILE_DIRECTIVES: Set[str] = {
+    "scenario",
+    "event",
+    "else if scenario",
+    "set variable",
+    "define",
+    "if",
+    "else",
+    "end if",
 }
 
 # ---- Regex patterns ----
