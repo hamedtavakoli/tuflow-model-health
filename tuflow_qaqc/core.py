@@ -73,6 +73,7 @@ class InputScanResult:
     tcf_path: Path
     control_tree: ControlTree
     inputs: List[InputRef]
+    debug_log: List[str] = field(default_factory=list)
 
 
 # ---- Stage 2: TUFLOW run test ----

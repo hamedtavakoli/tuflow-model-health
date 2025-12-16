@@ -8,7 +8,8 @@ import csv
 
 from .config import (
     COMMENT_RE, DIRECTIVE_RE, INLINE_COMMENT_SPLIT_RE, WILDCARD_RE,
-    FLOAT_RE, CONTROL_EXTS, GIS_EXTS, DB_EXTS, CONTROL_KEY_HINTS
+    FLOAT_RE, CONTROL_EXTS, GIS_EXTS, DB_EXTS, CONTROL_KEY_HINTS,
+    INPUT_KEY_HINTS, SOIL_EXTS
 )
 from .core import (
     ControlDirective, ControlFile, ControlTree, InputRef, InputScanResult,
@@ -210,8 +211,10 @@ def build_control_tree(
 # ---- Input scanning ----
 
 def _categorise_input_path(p: Path, keyword: str) -> str:
-    """Roughly categorise an input file as gis/database/other."""
+    """Roughly categorise an input file as gis/database/soil/other."""
     ext = p.suffix.lower()
+    if ext in SOIL_EXTS:
+        return "soil"
     if ext in GIS_EXTS:
         return "gis"
     if ext in DB_EXTS:
@@ -225,59 +228,91 @@ def _categorise_input_path(p: Path, keyword: str) -> str:
 def _scan_inputs_in_control_file(
     path: Path,
     wildcards: Dict[str, str],
+    *,
+    debug: bool = False,
+    debug_log: List[str],
 ) -> List[InputRef]:
-    """Scan a single control file for input file references (GIS, CSV, etc.)."""
+    """Scan a single control file for input file references (GIS, CSV, soils, etc.)."""
     import re
     inputs: List[InputRef] = []
 
+    def _log(msg: str) -> None:
+        if debug:
+            debug_log.append(msg)
+
     if not path.exists():
+        _log(f"{path}: skipped (file missing)")
         return inputs
 
     base_dir = path.parent
     text = path.read_text(encoding="utf-8", errors="ignore")
+    _log(f"Scanning {path}")
 
     for i, raw_line in enumerate(text.splitlines(), start=1):
         no_comment = _strip_inline_comment(raw_line)
         line = no_comment.strip()
         if not line or COMMENT_RE.match(line):
+            if debug:
+                reason = "empty" if not line else "comment"
+                _log(f"{path}:{i}: skipped ({reason}) -> {raw_line}")
             continue
 
         m = DIRECTIVE_RE.match(line)
         if not m:
+            _log(f"{path}:{i}: no directive match -> {raw_line}")
             continue
 
         key = m.group("key").strip()
         val_raw = m.group("value").strip()
+        key_lower = key.lower()
 
         # Substitute wildcards in the value
         val = substitute_wildcards(val_raw, wildcards)
 
-        # Heuristic: if the keyword strongly suggests an input file, or the
-        # value looks like a filename with an extension
+        is_known_input_key = any(h.lower() in key_lower for h in INPUT_KEY_HINTS)
         tokens = re.split(r"[\s,;]+", val.strip('"').strip("'"))
+        _log(f"{path}:{i}: directive '{key}' -> tokens {tokens}")
+
         for tok in tokens:
-            if not tok:
+            cleaned = tok.strip().strip('"').strip("'")
+            if not cleaned:
+                _log(f"{path}:{i}: empty token skipped")
                 continue
 
             # Only treat tokens with a dot as file-like
-            if "." not in tok:
+            if "." not in cleaned:
+                if is_known_input_key:
+                    _log(f"{path}:{i}: token '{cleaned}' skipped (no dot) despite keyword match")
                 continue
 
-            p = (base_dir / tok).resolve()
+            normalised = cleaned.replace("\\", "/")
+            p = (base_dir / normalised).resolve()
             kind = _categorise_input_path(p, key)
+            ext = p.suffix.lower()
 
-            # Only keep those that look like genuine inputs
-            if kind in {"gis", "database"}:
-                exists = p.exists()
-                inputs.append(
-                    InputRef(
-                        path=p,
-                        kind=kind,
-                        from_control=path,
-                        line=i,
-                        exists=exists,
-                    )
+            keep = (
+                kind in {"gis", "database", "soil"}
+                or is_known_input_key
+                or ext in SOIL_EXTS
+            )
+
+            if not keep:
+                _log(f"{path}:{i}: token '{cleaned}' skipped (unrecognised kind '{kind}')")
+                continue
+
+            exists = p.exists()
+            inputs.append(
+                InputRef(
+                    path=p,
+                    kind=kind,
+                    from_control=path,
+                    line=i,
+                    exists=exists,
                 )
+            )
+            _log(
+                f"{path}:{i}: matched '{key}' -> {p} (exists={exists}, kind={kind})"
+            )
 
     return inputs
 
@@ -285,17 +320,25 @@ def _scan_inputs_in_control_file(
 def scan_all_inputs(
     tcf_path: Path,
     wildcards: Dict[str, str],
+    *,
+    debug: bool = False,
 ) -> InputScanResult:
     """
     Stage 1: given a TCF and wildcard values, build the control tree,
     then scan all control files for GIS and database inputs.
     """
     control_tree = build_control_tree(tcf_path, wildcards)
-    seen_paths: set[Path] = set()
+    debug_log: List[str] = []
+    seen_paths: set[tuple[Path, str]] = set()
     all_inputs: List[InputRef] = []
 
     for cf_path in control_tree.all_files:
-        inputs = _scan_inputs_in_control_file(cf_path, wildcards)
+        inputs = _scan_inputs_in_control_file(
+            cf_path,
+            wildcards,
+            debug=debug,
+            debug_log=debug_log,
+        )
         for inp in inputs:
             # avoid duplicates: (path, from_control, line) can be unique;
             # but here we just dedupe by path and kind
@@ -309,6 +352,7 @@ def scan_all_inputs(
         tcf_path=tcf_path,
         control_tree=control_tree,
         inputs=all_inputs,
+        debug_log=debug_log,
     )
 
 
