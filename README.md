@@ -7,6 +7,10 @@ Tools for automated pre-run and test-run quality checks for TUFLOW hydraulic mod
 No external dependencies required beyond Python 3.7+. Uses only standard library modules:
 - `pathlib`, `dataclasses`, `enum`, `re`, `subprocess`, `csv`, `argparse`
 
+### QGIS plugin bundle
+
+The QGIS plugin ships the QA/QC engine inside `tuflow_model_health_qgis/vendor/tuflow_qaqc` so it always uses the bundled version. If you previously installed a separate `tuflow_qaqc` folder under your QGIS `python/plugins` directory, remove it to avoid conflicts.
+
 ## Quick Start
 
 ### Basic usage (Stage 0 & 1: Control files & inputs)

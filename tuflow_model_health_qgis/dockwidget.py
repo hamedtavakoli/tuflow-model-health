@@ -30,10 +30,10 @@ from qgis.PyQt.QtWidgets import (
 )
 from qgis.core import QgsApplication, QgsMessageLog, QgsTask, Qgis
 
-from tuflow_qaqc.api import RunResult, render_html_report, run_qaqc
-from tuflow_qaqc.parsing import find_wildcards_in_filename
-from tuflow_qaqc.core import Severity
-from tuflow_qaqc.wildcards import validate_wildcards
+from .vendor.tuflow_qaqc.api import RunResult, render_html_report, run_qaqc
+from .vendor.tuflow_qaqc.parsing import find_wildcards_in_filename
+from .vendor.tuflow_qaqc.core import Severity
+from .vendor.tuflow_qaqc.wildcards import validate_wildcards
 
 
 PLUGIN_SETTINGS_KEY = "TuflowModelHealth"

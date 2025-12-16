@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from tuflow_qaqc.core import InputCategory
-from tuflow_qaqc.parsing import scan_all_inputs
+from tuflow_model_health_qgis.vendor.tuflow_qaqc.core import InputCategory
+from tuflow_model_health_qgis.vendor.tuflow_qaqc.parsing import scan_all_inputs
 
 
 def test_generic_inputs_are_included(tmp_path: Path) -> None:
