@@ -7,3 +7,4 @@ email=
 description=Staged QA/QC checks for TUFLOW models (control parsing, input scan, optional TUFLOW test, log QA)
 about=Wraps tuflow_qaqc CLI into a QGIS dock widget.
 category=Hydrology
+icon=icons/tuflow_model_health.png
