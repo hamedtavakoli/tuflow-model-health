@@ -16,6 +16,7 @@ import sys
 from .api import run_qaqc
 from .config import DEFAULT_TUFLOW_EXE
 from .parsing import find_wildcards_in_filename, build_wildcard_map_from_args
+from .wildcards import validate_wildcards
 
 
 def main(argv: Optional[List[str]] = None) -> None:
@@ -85,6 +86,20 @@ def main(argv: Optional[List[str]] = None) -> None:
     filename_wildcards = find_wildcards_in_filename(tcf_path)
     # Build wildcard map from CLI args (and prompt for missing)
     wildcard_map = build_wildcard_map_from_args(filename_wildcards, wildcard_args)
+
+    validation = validate_wildcards(
+        str(tcf_path),
+        wildcard_map,
+        run_test=run_test,
+        stages_enabled={"stage0_1": True, "run_test": run_test},
+        will_build_paths=True,
+    )
+
+    if validation.severity == "error":
+        print(validation.message, file=sys.stderr)
+        sys.exit(2)
+    elif validation.severity == "warning":
+        print(validation.message, file=sys.stderr)
 
     result = run_qaqc(
         str(tcf_path),

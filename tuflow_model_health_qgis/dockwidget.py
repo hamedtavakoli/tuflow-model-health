@@ -16,6 +16,7 @@ from qgis.PyQt.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QTableWidget,
@@ -29,6 +30,7 @@ from qgis.core import QgsApplication, QgsMessageLog, QgsTask, Qgis
 from tuflow_qaqc.api import RunResult, run_qaqc
 from tuflow_qaqc.parsing import find_wildcards_in_filename
 from tuflow_qaqc.core import Severity
+from tuflow_qaqc.wildcards import validate_wildcards
 
 
 PLUGIN_SETTINGS_KEY = "TuflowModelHealth"
@@ -337,6 +339,25 @@ class TuflowModelHealthDockWidget(QDockWidget):
         wildcards = self._collect_wildcards()
         tuflow_exe = self.tuflow_exe_edit.text().strip()
 
+        run_test = self.run_test_checkbox.isChecked()
+        validation = validate_wildcards(
+            tcf_path,
+            wildcards,
+            run_test=run_test,
+            stages_enabled={"stage0_1": True, "run_test": run_test},
+            will_build_paths=True,
+        )
+
+        if validation.severity == "error":
+            QMessageBox.critical(self, "Missing wildcards", validation.message)
+            self.summary_label.setText(validation.message)
+            return
+        elif validation.severity == "warning":
+            self.summary_label.setText(validation.message)
+            QgsMessageLog.logMessage(
+                validation.message, "TUFLOW Model Health", Qgis.Warning
+            )
+
         self._save_settings()
         self._last_result = None
         self.summary_label.setText("Running QA/QC…")
@@ -344,7 +365,7 @@ class TuflowModelHealthDockWidget(QDockWidget):
 
         self._current_task = QaqcTask(
             tcf_path=tcf_path,
-            run_test=self.run_test_checkbox.isChecked(),
+            run_test=run_test,
             tuflow_exe=tuflow_exe,
             wildcards=wildcards,
             on_finished=self._task_finished,
