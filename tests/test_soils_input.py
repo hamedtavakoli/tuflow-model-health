@@ -2,8 +2,8 @@ from pathlib import Path
 
 from pathlib import Path
 
-from tuflow_qaqc.core import InputCategory
-from tuflow_qaqc.parsing import scan_all_inputs
+from tuflow_model_health_qgis.vendor.tuflow_qaqc.core import InputCategory
+from tuflow_model_health_qgis.vendor.tuflow_qaqc.parsing import scan_all_inputs
 
 
 def test_read_soils_file_is_detected(tmp_path: Path) -> None:

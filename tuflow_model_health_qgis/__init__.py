@@ -1,21 +1,37 @@
-import sys
+import importlib.util
 from pathlib import Path
 
 
-def _ensure_core_on_path() -> None:
-    """Make sure the tuflow_qaqc package bundled with the plugin is importable."""
+try:
+    _qgis_spec = importlib.util.find_spec("qgis.core")
+except ModuleNotFoundError:
+    _qgis_spec = None
+if _qgis_spec:
+    from qgis.core import QgsMessageLog, Qgis
+else:
+    QgsMessageLog = None
+    Qgis = None
 
-    plugin_dir = Path(__file__).resolve().parent
-    candidates = [plugin_dir, plugin_dir.parent]
-    for candidate in candidates:
-        if str(candidate) not in sys.path:
-            sys.path.insert(0, str(candidate))
 
+def _log_bundled_engine_path() -> None:
+    """Log which tuflow_qaqc module is in use to detect conflicts."""
 
-_ensure_core_on_path()
+    from .vendor import tuflow_qaqc as bundled_qaqc
+
+    engine_path = Path(bundled_qaqc.__file__).resolve()
+    plugin_root = Path(__file__).resolve().parent
+    in_plugin = plugin_root in engine_path.parents or engine_path.parent == plugin_root
+    if QgsMessageLog and Qgis:
+        level = Qgis.Info if in_plugin else Qgis.Warning
+        prefix = "Using bundled" if in_plugin else "Unexpected"
+        QgsMessageLog.logMessage(
+            f"{prefix} tuflow_qaqc at {engine_path}", "TUFLOW Model Health", level
+        )
 
 
 def classFactory(iface):
+    _log_bundled_engine_path()
+
     from .main import TuflowModelHealthPlugin
 
     return TuflowModelHealthPlugin(iface)

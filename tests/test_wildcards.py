@@ -1,4 +1,4 @@
-from tuflow_qaqc.wildcards import validate_wildcards
+from tuflow_model_health_qgis.vendor.tuflow_qaqc.wildcards import validate_wildcards
 
 
 def test_run_test_blocks_on_missing_wildcards():
