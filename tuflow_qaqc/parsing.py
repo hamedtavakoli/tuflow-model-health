@@ -12,8 +12,19 @@ from .config import (
     INPUT_KEY_HINTS, SOIL_EXTS
 )
 from .core import (
-    ControlDirective, ControlFile, ControlTree, InputRef, InputScanResult,
-    TuflowTlfSummary, TuflowHpcSummary, TuflowMaterial, TuflowSoil, Issue, Severity
+    ControlDirective,
+    ControlFile,
+    ControlTree,
+    InputCategory,
+    InputRef,
+    InputScanResult,
+    ModelNode,
+    TuflowTlfSummary,
+    TuflowHpcSummary,
+    TuflowMaterial,
+    TuflowSoil,
+    Issue,
+    Severity,
 )
 
 
@@ -205,19 +216,19 @@ def build_control_tree(
 
 # ---- Input scanning ----
 
-def _categorise_input_path(p: Path, keyword: str) -> str:
-    """Roughly categorise an input file as gis/database/soil/other."""
+def _categorise_input_path(p: Path, keyword: str) -> InputCategory:
+    """Categorise an input file for reporting purposes."""
     ext = p.suffix.lower()
     if ext in SOIL_EXTS:
-        return "soil"
+        return InputCategory.INPUT
     if ext in GIS_EXTS:
-        return "gis"
+        return InputCategory.GIS
     if ext in DB_EXTS:
-        return "database"
+        return InputCategory.DATABASE
     # Prefer marking 'Database' keywords as database even without known ext
     if "database" in keyword.lower():
-        return "database"
-    return "other"
+        return InputCategory.DATABASE
+    return InputCategory.INPUT
 
 
 def _scan_inputs_in_control_file(
@@ -264,7 +275,6 @@ def _scan_inputs_in_control_file(
         # Substitute wildcards in the value
         val = substitute_wildcards(val_raw, wildcards)
 
-        is_known_input_key = any(h.lower() in key_lower for h in INPUT_KEY_HINTS)
         tokens = re.split(r"[\s,;]+", val.strip('"').strip("'"))
         _log(f"{path}:{i}: directive '{key}' -> tokens {tokens}")
 
@@ -274,39 +284,22 @@ def _scan_inputs_in_control_file(
                 _log(f"{path}:{i}: empty token skipped")
                 continue
 
-            # Only treat tokens with a dot as file-like
-            if "." not in cleaned:
-                if is_known_input_key:
-                    _log(f"{path}:{i}: token '{cleaned}' skipped (no dot) despite keyword match")
-                continue
-
             normalised = cleaned.replace("\\", "/")
             p = (base_dir / normalised).resolve()
-            kind = _categorise_input_path(p, key)
-            ext = p.suffix.lower()
-
-            keep = (
-                kind in {"gis", "database", "soil"}
-                or is_known_input_key
-                or ext in SOIL_EXTS
-            )
-
-            if not keep:
-                _log(f"{path}:{i}: token '{cleaned}' skipped (unrecognised kind '{kind}')")
-                continue
+            category = _categorise_input_path(p, key)
 
             exists = p.exists()
             inputs.append(
                 InputRef(
                     path=p,
-                    kind=kind,
+                    category=category,
                     from_control=path,
                     line=i,
                     exists=exists,
                 )
             )
             _log(
-                f"{path}:{i}: matched '{key}' -> {p} (exists={exists}, kind={kind})"
+                f"{path}:{i}: matched '{key}' -> {p} (exists={exists}, kind={category})"
             )
 
     return inputs
@@ -336,19 +329,104 @@ def scan_all_inputs(
         )
         for inp in inputs:
             # avoid duplicates: (path, from_control, line) can be unique;
-            # but here we just dedupe by path and kind
-            key = (inp.path, inp.kind)
+            # but here we just dedupe by path and category
+            key = (inp.path, inp.category)
             if key in seen_paths:
                 continue
             seen_paths.add(key)
             all_inputs.append(inp)
 
+    model_tree = build_model_tree(control_tree, all_inputs)
+
     return InputScanResult(
         tcf_path=tcf_path,
         control_tree=control_tree,
         inputs=all_inputs,
+        model_tree=model_tree,
         debug_log=debug_log,
     )
+
+
+def _build_control_node(
+    path: Path,
+    edges: Dict[Path, List[Path]],
+    *,
+    parent: Optional[Path] = None,
+) -> ModelNode:
+    """Recursive helper to convert the control tree into ModelNode entries."""
+
+    node = ModelNode(
+        name=path.name,
+        path=path,
+        category=InputCategory.CONTROL,
+        exists=path.exists(),
+        source_control=str(parent) if parent else None,
+    )
+
+    for child in edges.get(path, []):
+        node.children.append(_build_control_node(child, edges, parent=path))
+
+    return node
+
+
+def _group_inputs_by_category(inputs: List[InputRef]) -> Dict[InputCategory, List[ModelNode]]:
+    """Convert InputRef objects into ModelNode leaves grouped by category."""
+
+    grouped: Dict[InputCategory, List[ModelNode]] = {
+        InputCategory.INPUT: [],
+        InputCategory.DATABASE: [],
+        InputCategory.GIS: [],
+    }
+
+    for inp in sorted(inputs, key=lambda x: (x.category.value, str(x.path))):
+        grouped.setdefault(inp.category, [])
+        grouped[inp.category].append(
+            ModelNode(
+                name=inp.path.name,
+                path=inp.path,
+                category=inp.category,
+                exists=inp.exists,
+                source_control=str(inp.from_control),
+            )
+        )
+
+    return grouped
+
+
+def build_model_tree(control_tree: ControlTree, inputs: List[InputRef]) -> ModelNode:
+    """Build the unified model structure tree used across outputs."""
+
+    root = ModelNode(name="Model Structure", path=None, category=None)
+
+    # Control files hierarchy
+    control_root = ModelNode(
+        name="Control Files",
+        path=None,
+        category=InputCategory.CONTROL,
+    )
+    control_root.children.append(
+        _build_control_node(control_tree.root_tcf, control_tree.edges)
+    )
+
+    grouped_inputs = _group_inputs_by_category(inputs)
+
+    def _category_node(title: str, cat: InputCategory) -> ModelNode:
+        return ModelNode(name=title, path=None, category=cat)
+
+    input_root = _category_node("Input Files", InputCategory.INPUT)
+    input_root.children.extend(grouped_inputs.get(InputCategory.INPUT, []))
+
+    db_root = _category_node("Databases", InputCategory.DATABASE)
+    db_root.children.extend(grouped_inputs.get(InputCategory.DATABASE, []))
+
+    gis_root = _category_node("GIS Layers", InputCategory.GIS)
+    gis_root.children.extend(grouped_inputs.get(InputCategory.GIS, []))
+
+    for node in (control_root, input_root, db_root, gis_root):
+        if node.children:
+            root.children.append(node)
+
+    return root
 
 
 # ---- Log file utilities ----

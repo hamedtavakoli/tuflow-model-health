@@ -2,42 +2,35 @@
 CLI interface and output formatting for TUFLOW QA/QC validator.
 """
 
-from pathlib import Path
 from typing import List
 
-from .core import ControlTree, InputScanResult, TuflowTestResult, Issue
+from .core import InputScanResult, ModelNode, TuflowTestResult, Issue
 
 
-def _print_control_tree(tree: ControlTree) -> None:
-    """Print control file tree using ASCII-only characters (for Windows cp1252)."""
+def _format_node_label(node: ModelNode) -> str:
+    """Readable label for a model node with existence hints."""
 
-    def recurse(node: Path, prefix: str = "") -> None:
-        children = tree.edges.get(node, [])
-        for idx, child in enumerate(children):
-            is_last = idx == len(children) - 1
+    label = node.name
+    if node.path:
+        label = f"{label} ({node.path})"
+        if not node.exists:
+            label += " [MISSING]"
+    return label
+
+
+def _print_model_tree(node: ModelNode) -> None:
+    """Print the unified model tree using ASCII-only characters."""
+
+    def recurse(n: ModelNode, prefix: str = "") -> None:
+        for idx, child in enumerate(n.children):
+            is_last = idx == len(n.children) - 1
             connector = "+-- " if is_last else "|-- "
-            print(f"{prefix}{connector}{child.name}")
+            print(f"{prefix}{connector}{_format_node_label(child)}")
             next_prefix = prefix + ("    " if is_last else "|   ")
             recurse(child, next_prefix)
 
-    print(tree.root_tcf.name)
-    recurse(tree.root_tcf)
-
-
-def _print_input_scan(result: InputScanResult) -> None:
-    """Print input files found during scan."""
-    print("\nInput files (GIS & Databases):")
-    if not result.inputs:
-        print("  (none found)")
-        return
-
-    for inp in sorted(result.inputs, key=lambda x: (x.kind, str(x.path))):
-        status = "OK" if inp.exists else "MISSING"
-        status_tag = "[OK]     " if inp.exists else "[MISSING]"
-        print(
-            f"  {status_tag} {inp.kind:9s} {inp.path} "
-            f"(from {inp.from_control.name}, line {inp.line})"
-        )
+    print(node.name)
+    recurse(node)
 
 
 def print_validation_report(
@@ -46,10 +39,13 @@ def print_validation_report(
     qa_issues: List[Issue] = None,
 ) -> None:
     """Print a complete validation report."""
-    # Report control file tree
+    # Report unified model structure
     print(f"TCF: {result.tcf_path}")
-    print("\nControl file tree:")
-    _print_control_tree(result.control_tree)
+    print("\nModel structure:")
+    if result.model_tree:
+        _print_model_tree(result.model_tree)
+    else:
+        print("  (no model tree built)")
 
     # Report any control-file issues (missing/unreadable)
     if result.control_tree.issues:
@@ -61,9 +57,6 @@ def print_validation_report(
             )
     else:
         print("\nControl file issues: (none)")
-
-    # Report inputs
-    _print_input_scan(result)
 
     # Report TUFLOW test results if available
     if test_result:

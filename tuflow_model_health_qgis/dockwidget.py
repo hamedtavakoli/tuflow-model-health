@@ -5,7 +5,8 @@ import traceback
 from pathlib import Path
 from typing import Optional
 
-from qgis.PyQt.QtCore import Qt, QSettings, pyqtSignal
+from qgis.PyQt.QtCore import Qt, QSettings, QUrl, pyqtSignal
+from qgis.PyQt.QtGui import QDesktopServices, QStandardItem, QStandardItemModel
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -22,6 +23,7 @@ from qgis.PyQt.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTextBrowser,
+    QTreeView,
     QVBoxLayout,
     QWidget,
 )
@@ -34,6 +36,7 @@ from tuflow_qaqc.wildcards import validate_wildcards
 
 
 PLUGIN_SETTINGS_KEY = "TuflowModelHealth"
+TREE_PATH_ROLE = Qt.UserRole + 10
 
 
 class QaqcTask(QgsTask):
@@ -219,6 +222,17 @@ class TuflowModelHealthDockWidget(QDockWidget):
         group = QGroupBox("Results")
         v = QVBoxLayout(group)
         self.summary_label = QLabel("No run yet.")
+        v.addWidget(self.summary_label)
+
+        self.model_tree_view = QTreeView()
+        self.model_tree_view.setHeaderHidden(True)
+        self.model_tree_view.setExpandsOnDoubleClick(True)
+        self.model_tree_view.clicked.connect(self._on_tree_clicked)
+        self._set_empty_tree_model()
+
+        v.addWidget(QLabel("Model structure:"))
+        v.addWidget(self.model_tree_view)
+
         self.report_view = QTextBrowser()
         self.report_view.setOpenExternalLinks(True)
 
@@ -237,10 +251,60 @@ class TuflowModelHealthDockWidget(QDockWidget):
         export_row.addWidget(self.export_json_btn)
         export_row.addStretch()
 
-        v.addWidget(self.summary_label)
         v.addWidget(self.report_view)
         v.addLayout(export_row)
         return group
+
+    def _set_empty_tree_model(self) -> None:
+        model = QStandardItemModel()
+        model.setHorizontalHeaderLabels(["Model structure"])
+        self.model_tree_view.setModel(model)
+
+    def _build_tree_item(self, node) -> QStandardItem:
+        label = node.name
+        if node.path and not node.exists:
+            label = f"⚠️ {label} (missing)"
+        item = QStandardItem(label)
+        item.setEditable(False)
+
+        tooltip_parts = []
+        if node.path:
+            tooltip_parts.append(str(node.path))
+            item.setData(str(node.path), TREE_PATH_ROLE)
+        if node.source_control:
+            tooltip_parts.append(f"from {node.source_control}")
+        if tooltip_parts:
+            item.setToolTip(" | ".join(tooltip_parts))
+
+        for child in node.children:
+            item.appendRow(self._build_tree_item(child))
+
+        return item
+
+    def _populate_model_tree(self, model_tree) -> None:
+        if not hasattr(self, "model_tree_view"):
+            return
+
+        model = QStandardItemModel()
+        model.setHorizontalHeaderLabels(["Model structure"])
+
+        root_item = model.invisibleRootItem()
+        if model_tree:
+            for child in model_tree.children:
+                root_item.appendRow(self._build_tree_item(child))
+
+        self.model_tree_view.setModel(model)
+        self.model_tree_view.expandAll()
+
+    def _on_tree_clicked(self, index) -> None:
+        path = index.data(TREE_PATH_ROLE)
+        if not path:
+            return
+        self._open_file_location(Path(path))
+
+    def _open_file_location(self, path: Path) -> None:
+        target = path if path.is_dir() else path.parent
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
 
     # ---- Settings ----
     def _load_settings(self) -> None:
@@ -362,6 +426,7 @@ class TuflowModelHealthDockWidget(QDockWidget):
         self._last_result = None
         self.summary_label.setText("Running QA/QC…")
         self.report_view.clear()
+        self._set_empty_tree_model()
 
         self._current_task = QaqcTask(
             tcf_path=tcf_path,
@@ -414,6 +479,8 @@ class TuflowModelHealthDockWidget(QDockWidget):
         self.summary_label.setText(
             f"Errors: {errors} | Warnings: {warnings} | Info: {infos}"
         )
+
+        self._populate_model_tree(getattr(result, "model_tree", None))
 
         if result.report_html:
             self.report_view.setHtml(result.report_html)
