@@ -57,11 +57,32 @@ class ControlTree:
     issues: List[Issue]
 
 
+class InputCategory(str, Enum):
+    """Classification for model files discovered during scanning."""
+
+    CONTROL = "CONTROL"
+    INPUT = "INPUT"
+    DATABASE = "DATABASE"
+    GIS = "GIS"
+
+
+@dataclass
+class ModelNode:
+    """A node in the unified model tree used by the CLI, UI, and reports."""
+
+    name: str
+    path: Optional[Path]
+    category: Optional[InputCategory]
+    children: List["ModelNode"] = field(default_factory=list)
+    exists: bool = True
+    source_control: Optional[str] = None
+
+
 @dataclass
 class InputRef:
     """Reference to an input GIS or database file."""
     path: Path
-    kind: str  # "gis" or "database" or "other"
+    category: InputCategory
     from_control: Path
     line: int
     exists: bool
@@ -73,6 +94,7 @@ class InputScanResult:
     tcf_path: Path
     control_tree: ControlTree
     inputs: List[InputRef]
+    model_tree: Optional[ModelNode]
     debug_log: List[str] = field(default_factory=list)
 
 
