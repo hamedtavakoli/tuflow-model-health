@@ -36,6 +36,41 @@ def _strip_inline_comment(line: str) -> str:
     return parts[0]
 
 
+def _strip_quotes(text: str) -> str:
+    """Remove single and double quotes around a token."""
+    return text.strip().strip('"').strip("'")
+
+
+def looks_like_file_path(text: str) -> bool:
+    """Heuristic check that a token looks like a real filename with extension."""
+
+    cleaned = _strip_inline_comment(text).strip()
+    cleaned = _strip_quotes(cleaned)
+
+    if "|" in cleaned:
+        cleaned = cleaned.split("|", maxsplit=1)[0].strip()
+
+    if not cleaned:
+        return False
+
+    lower = cleaned.lower()
+    if lower in {"on", "off"}:
+        return False
+
+    # Reject pure numbers
+    if FLOAT_RE.fullmatch(cleaned):
+        return False
+
+    p = Path(cleaned)
+    if not p.suffix:
+        return False
+
+    if not p.stem:
+        return False
+
+    return True
+
+
 def parse_control_file(path: Path) -> ControlFile:
     """Parse a TUFLOW-style control file into directives (key == value lines)."""
     directives: List[ControlDirective] = []
@@ -219,15 +254,25 @@ def build_control_tree(
 def _categorise_input_path(p: Path, keyword: str) -> InputCategory:
     """Categorise an input file for reporting purposes."""
     ext = p.suffix.lower()
+    key_lower = keyword.lower()
+
+    if ext in CONTROL_EXTS:
+        return InputCategory.CONTROL
+
     if ext in SOIL_EXTS:
         return InputCategory.INPUT
+
     if ext in GIS_EXTS:
+        if ext == ".gpkg" and "database" in key_lower:
+            return InputCategory.DATABASE
         return InputCategory.GIS
+
     if ext in DB_EXTS:
         return InputCategory.DATABASE
-    # Prefer marking 'Database' keywords as database even without known ext
-    if "database" in keyword.lower():
+
+    if ext == ".gpkg" and "database" in key_lower:
         return InputCategory.DATABASE
+
     return InputCategory.INPUT
 
 
@@ -241,6 +286,7 @@ def _scan_inputs_in_control_file(
     """Scan a single control file for input file references (GIS, CSV, soils, etc.)."""
     import re
     inputs: List[InputRef] = []
+    ignored_non_files = 0
 
     def _log(msg: str) -> None:
         if debug:
@@ -275,13 +321,40 @@ def _scan_inputs_in_control_file(
         # Substitute wildcards in the value
         val = substitute_wildcards(val_raw, wildcards)
 
-        tokens = re.split(r"[\s,;]+", val.strip('"').strip("'"))
-        _log(f"{path}:{i}: directive '{key}' -> tokens {tokens}")
+        raw_tokens = [t for t in re.split(r"[\s,;]+", val) if t]
+        _log(f"{path}:{i}: directive '{key}' -> tokens {raw_tokens}")
 
-        for tok in tokens:
-            cleaned = tok.strip().strip('"').strip("'")
-            if not cleaned:
-                _log(f"{path}:{i}: empty token skipped")
+        idx = 0
+        while idx < len(raw_tokens):
+            tok = raw_tokens[idx]
+            layer: Optional[str] = None
+
+            if "|" in tok and tok != "|":
+                file_part, layer_part = tok.split("|", maxsplit=1)
+                tok = file_part
+                layer = _strip_quotes(layer_part.strip()) or None
+                idx += 1
+            elif idx + 1 < len(raw_tokens) and raw_tokens[idx + 1] == "|":
+                if idx + 2 < len(raw_tokens):
+                    layer = _strip_quotes(raw_tokens[idx + 2].strip()) or None
+                    idx += 3
+                else:
+                    idx += 2
+            elif idx + 1 < len(raw_tokens) and raw_tokens[idx + 1].startswith("|"):
+                layer = _strip_quotes(raw_tokens[idx + 1][1:].strip()) or None
+                idx += 2
+            else:
+                idx += 1
+
+            cleaned = _strip_quotes(tok.strip())
+            if "|" in cleaned:
+                cleaned = cleaned.split("|", maxsplit=1)[0].strip()
+
+            if not looks_like_file_path(cleaned):
+                ignored_non_files += 1
+                _log(
+                    f"{path}:{i}: ignored token '{tok}' (layer={layer}) - does not look like a file"
+                )
                 continue
 
             normalised = cleaned.replace("\\", "/")
@@ -296,11 +369,15 @@ def _scan_inputs_in_control_file(
                     from_control=path,
                     line=i,
                     exists=exists,
+                    layer=layer,
                 )
             )
             _log(
-                f"{path}:{i}: matched '{key}' -> {p} (exists={exists}, kind={category})"
+                f"{path}:{i}: matched '{key}' -> {p} (exists={exists}, kind={category}, layer={layer})"
             )
+
+    if ignored_non_files:
+        _log(f"{path}: ignored non-file tokens: {ignored_non_files}")
 
     return inputs
 
@@ -330,7 +407,7 @@ def scan_all_inputs(
         for inp in inputs:
             # avoid duplicates: (path, from_control, line) can be unique;
             # but here we just dedupe by path and category
-            key = (inp.path, inp.category)
+            key = (inp.path, inp.category, inp.layer)
             if key in seen_paths:
                 continue
             seen_paths.add(key)
@@ -378,17 +455,44 @@ def group_inputs_by_category(inputs: List[InputRef]) -> Dict[InputCategory, List
         InputCategory.GIS: [],
     }
 
-    for inp in sorted(inputs, key=lambda x: (x.category.value, str(x.path))):
+    parent_map: Dict[Tuple[InputCategory, Path], ModelNode] = {}
+
+    for inp in sorted(inputs, key=lambda x: (x.category.value, str(x.path), x.layer or "")):
         grouped.setdefault(inp.category, [])
-        grouped[inp.category].append(
-            ModelNode(
-                name=inp.path.name,
-                path=inp.path,
-                category=inp.category,
-                exists=inp.exists,
-                source_control=str(inp.from_control),
+
+        key = (inp.category, inp.path)
+        if inp.layer:
+            parent = parent_map.get(key)
+            if not parent:
+                parent = ModelNode(
+                    name=inp.path.name,
+                    path=inp.path,
+                    category=inp.category,
+                    exists=inp.exists,
+                    source_control=str(inp.from_control),
+                )
+                parent_map[key] = parent
+                grouped[inp.category].append(parent)
+
+            parent.children.append(
+                ModelNode(
+                    name=inp.layer,
+                    path=None,
+                    category=inp.category,
+                    exists=True,
+                    source_control=str(inp.from_control),
+                )
             )
-        )
+        else:
+            grouped[inp.category].append(
+                ModelNode(
+                    name=inp.path.name,
+                    path=inp.path,
+                    category=inp.category,
+                    exists=inp.exists,
+                    source_control=str(inp.from_control),
+                )
+            )
 
     return grouped
 
