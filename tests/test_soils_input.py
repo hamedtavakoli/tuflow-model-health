@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from pathlib import Path
+
 from tuflow_qaqc.parsing import scan_all_inputs
 
 

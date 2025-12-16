@@ -76,7 +76,9 @@ def build_wildcard_map_from_args(
     """
     Build a wildcard->value map from CLI args.
     Supports args like: -e1 00100Y -e2 0060m -s1 5m -s2 CL0
-    If any required wildcard is missing, prompt the user.
+
+    The function no longer prompts; it simply returns the values supplied by
+    the user so that callers can perform validation/handling as needed.
     """
     supplied: Dict[str, str] = {}
 
@@ -91,13 +93,6 @@ def build_wildcard_map_from_args(
                 i += 2
                 continue
         i += 1
-
-    # Prompt for any missing required wildcards
-    for w in filename_wildcards:
-        if w not in supplied:
-            prompt_name = f"-{w}"
-            val = input(f"Enter value for {prompt_name}: ").strip()
-            supplied[w] = val
 
     return supplied
 
