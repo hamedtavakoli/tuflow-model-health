@@ -24,12 +24,27 @@ SOIL_EXTS: Set[str] = {
 INPUT_EXTS |= SOIL_EXTS
 
 GIS_EXTS: Set[str] = {
-    ".shp", ".tab", ".mif", ".mid", ".gpkg", ".gdb",
-    ".tif", ".tiff", ".asc", ".flt", ".grd",
+    ".shp",
+    ".tab",
+    ".mif",
+    ".mid",
+    ".gpkg",
+    ".gdb",
+    ".tif",
+    ".tiff",
+    ".asc",
+    ".flt",
+    ".bil",
+    ".grd",
 }
 
 DB_EXTS: Set[str] = {
-    ".csv", ".txt", ".dat", ".dbf", ".sqlite",
+    ".csv",
+    ".txt",
+    ".dat",
+    ".dbf",
+    ".sqlite",
+    ".gpkg",
 }
 
 ALL_KNOWN_FILE_EXTS: Set[str] = set()
@@ -52,39 +67,74 @@ CONTROL_DIRECTIVES: Set[str] = {
     "quadtree control file",
     "estry control file",
     "structure control file",
+    "event file",
+    "rainfall control file",
+    "operations control file",
+    "read operating controls",
+    "external stress file",
+    "ad control file",
+    "swmm control file",
 }
 
 INPUT_DIRECTIVES: Set[str] = {
     "soils file",
+    "read soils file",
     "infiltration file",
     "losses file",
     "rainfall file",
+    "rainfall pattern file",
     "read rainfall",
+    "read rf",
     "inflow file",
+    "flow hydrograph",
+    "stage hydrograph",
+    "hq file",
+    "zq file",
+    "qt file",
     "restart file",
     "initial conditions file",
     "read materials file",
     "read table",
-    "read soils file",
+    "read roughness file",
+    "read resistance file",
+    "blockage matrix file",
+    "fews input file",
 }
 
 GIS_DIRECTIVES: Set[str] = {
     "read gis",
     "read gis z shape",
-    "read bc gis",
-    "read grid",
-    "read dem",
-    "read asc",
-    "read tif",
+    "read gis code",
+    "read gis attribute",
     "read gis materials",
     "read gis roughness",
+    "read gis resistance",
+    "read gis source",
+    "read gis boundary",
+    "read gis flow",
+    "read bc",
+    "read bc gis",
+    "read source gis",
 }
 
 DATABASE_DIRECTIVES: Set[str] = {
     "bc database",
     "read bc database",
+    "spatial database",
     "read structure database",
     "read attribute database",
+}
+
+GRID_DIRECTIVES: Set[str] = {
+    "read grid",
+    "read dem",
+    "read asc",
+    "read tif",
+    "read tiff",
+    "read bil",
+    "read flt",
+    "rainfall grid",
+    "read rainfall grid",
 }
 
 NON_FILE_DIRECTIVES: Set[str] = {

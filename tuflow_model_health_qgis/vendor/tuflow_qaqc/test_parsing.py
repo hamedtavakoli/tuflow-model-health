@@ -20,6 +20,11 @@ def test_looks_like_file_path_filters_non_files():
 def test_scan_filters_noise_and_collects_layers(tmp_path: Path):
     control = tmp_path / "model.tcf"
     (tmp_path / "model.tgc").write_text("")
+    (tmp_path / "rasters").mkdir()
+    (tmp_path / "rasters" / "dem.asc").write_text("")
+    (tmp_path / "inputs").mkdir()
+    (tmp_path / "inputs" / "rain.dat").write_text("")
+    (tmp_path / "inputs" / "spatial.gpkg").write_text("")
 
     control.write_text(
         """
@@ -29,6 +34,9 @@ Soils File == ..\\inputs\\soil.tsoilf
 Read GIS == model.gpkg | 2d_bc
 BC Database == bc.csv
 Geometry Control File == model.tgc
+Rainfall Grid == rasters\\dem.asc
+Read RF == inputs\\rain.dat
+Spatial Database == inputs\\spatial.gpkg
 """
     )
 
@@ -44,6 +52,15 @@ Geometry Control File == model.tgc
 
     assert "bc.csv" in by_name
     assert by_name["bc.csv"].category == InputCategory.DATABASE
+
+    assert "dem.asc" in by_name
+    assert by_name["dem.asc"].category == InputCategory.GRID
+
+    assert "rain.dat" in by_name
+    assert by_name["rain.dat"].category == InputCategory.INPUT
+
+    assert "spatial.gpkg" in by_name
+    assert by_name["spatial.gpkg"].category == InputCategory.DATABASE
 
     assert "2.5" not in by_name
 
