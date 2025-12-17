@@ -316,6 +316,8 @@ def run_qaqc(
         ok = False
     if any(not inp.exists for inp in scan_result.inputs):
         ok = False
+    if scan_result.missing_required_directives:
+        ok = False
 
     t_end = time.perf_counter()
     timings["total"] = t_end - t_start
