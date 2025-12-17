@@ -64,6 +64,7 @@ class InputCategory(str, Enum):
     INPUT = "INPUT"
     DATABASE = "DATABASE"
     GIS = "GIS"
+    GRID = "GRID"
 
 
 @dataclass

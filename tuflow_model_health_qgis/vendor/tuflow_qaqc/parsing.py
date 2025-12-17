@@ -22,6 +22,7 @@ from .config import (
     INPUT_DIRECTIVES,
     GIS_DIRECTIVES,
     DATABASE_DIRECTIVES,
+    GRID_DIRECTIVES,
     NON_FILE_DIRECTIVES,
     ALL_KNOWN_FILE_EXTS,
 )
@@ -76,7 +77,7 @@ def _file_token_status(text: str) -> Tuple[bool, str]:
         return False, "empty token"
 
     lower = cleaned.lower()
-    if lower in {"on", "off", "true", "false"}:
+    if lower in {"on", "off", "true", "false", "yes", "no"}:
         return False, "boolean flag"
 
     if FLOAT_RE.fullmatch(cleaned):
@@ -148,6 +149,8 @@ def _classify_directive(key_norm: str) -> Optional[InputCategory]:
         return InputCategory.GIS
     if key_norm in DATABASE_DIRECTIVES:
         return InputCategory.DATABASE
+    if key_norm in GRID_DIRECTIVES:
+        return InputCategory.GRID
     if key_norm in INPUT_DIRECTIVES:
         return InputCategory.INPUT
     return None
@@ -491,6 +494,7 @@ def group_inputs_by_category(inputs: List[InputRef]) -> Dict[InputCategory, List
         InputCategory.INPUT: [],
         InputCategory.DATABASE: [],
         InputCategory.GIS: [],
+        InputCategory.GRID: [],
     }
 
     parent_map: Dict[Tuple[InputCategory, Path], ModelNode] = {}
@@ -564,7 +568,10 @@ def build_model_tree(control_tree: ControlTree, inputs: List[InputRef]) -> Model
     gis_root = _category_node("GIS Layers", InputCategory.GIS)
     gis_root.children.extend(grouped_inputs.get(InputCategory.GIS, []))
 
-    for node in (control_root, input_root, db_root, gis_root):
+    grid_root = _category_node("Grid Inputs", InputCategory.GRID)
+    grid_root.children.extend(grouped_inputs.get(InputCategory.GRID, []))
+
+    for node in (control_root, input_root, db_root, gis_root, grid_root):
         if node.children:
             root.children.append(node)
 
