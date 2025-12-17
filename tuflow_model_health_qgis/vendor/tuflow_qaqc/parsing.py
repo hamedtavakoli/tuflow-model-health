@@ -150,6 +150,13 @@ def _tokenise_value(value: str) -> List[Tuple[str, Optional[str]]]:
 def _classify_directive(key_norm: str) -> Optional[InputCategory]:
     """Return the InputCategory for a directive, if recognised."""
 
+    # Handle command *families* via prefix matching so we don't need
+    # to enumerate every variant (e.g. "Read GIS MAT", "Read GRID ZPTS").
+    if key_norm.startswith("read gis"):
+        return InputCategory.GIS
+    if key_norm.startswith("read grid"):
+        return InputCategory.GRID
+
     category = DIRECTIVE_CATEGORY.get(key_norm)
     if category == "control":
         return InputCategory.CONTROL

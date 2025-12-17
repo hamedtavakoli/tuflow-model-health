@@ -76,3 +76,51 @@ Read Table == unusual.abc
 
     assert any(child.name == "model.tgc" for child in result.control_tree.edges[control])
 
+
+def test_read_gis_and_grid_prefix_families(tmp_path: Path):
+    control = tmp_path / "model.tcf"
+    (tmp_path / "model.tgc").write_text("")
+    (tmp_path / "inputs").mkdir()
+
+    gis_files = {
+        "layers.gpkg": "| 2d_bc",
+        "materials.gpkg": "| mat",
+        "soils.gpkg": "| soil",
+    }
+    grid_files = {
+        "dem.tif": "",
+        "z.asc": "",
+        "mat.flt": "",
+    }
+
+    for fname, layer in {**gis_files, **grid_files}.items():
+        (tmp_path / "inputs" / fname).write_text("")
+
+    control.write_text(
+        "\n".join(
+            [
+                "Geometry Control File == model.tgc",
+                "Read GIS == inputs/layers.gpkg | 2d_bc",
+                "Read GIS MAT == inputs/materials.gpkg | mat",
+                "READ gis soil == inputs/soils.gpkg | soil",
+                "Read GRID == inputs/dem.tif",
+                "Read Grid ZPTS == inputs/z.asc",
+                "READ GRID MAT == inputs/mat.flt",
+            ]
+        )
+    )
+
+    result = scan_all_inputs(control, wildcards={}, debug=True)
+
+    by_name = {inp.path.name: inp for inp in result.inputs}
+
+    assert by_name["layers.gpkg"].category == InputCategory.GIS
+    assert by_name["layers.gpkg"].layer == "2d_bc"
+
+    assert by_name["materials.gpkg"].category == InputCategory.GIS
+    assert by_name["soils.gpkg"].category == InputCategory.GIS
+
+    assert by_name["dem.tif"].category == InputCategory.GRID
+    assert by_name["z.asc"].category == InputCategory.GRID
+    assert by_name["mat.flt"].category == InputCategory.GRID
+
