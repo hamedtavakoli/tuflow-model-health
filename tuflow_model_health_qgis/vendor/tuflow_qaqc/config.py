@@ -8,6 +8,12 @@ import re
 from pathlib import Path
 from typing import Set, Dict, Literal
 
+
+def normalize_directive(s: str) -> str:
+    """Canonicalise directive keywords for case-insensitive matching."""
+
+    return " ".join(s.strip().split()).casefold()
+
 # ---- File extensions ----
 
 CONTROL_EXTS: Set[str] = {
@@ -55,98 +61,160 @@ ALL_KNOWN_FILE_EXTS |= DB_EXTS
 
 # ---- Directive allow/deny lists ----
 
-# These allow-lists mirror TUFLOW documentation. They must be explicit; no
-# inference from unknown directives is allowed. Keep entries lower-cased and
-# whitespace-normalised for matching.
-
 CONTROL_DIRECTIVES: Set[str] = {
-    "read file",
-    "geometry control file",
-    "bc control file",
-    "event control file",
-    "quadtree control file",
-    "estry control file",
-    "structure control file",
-    "event file",
-    "rainfall control file",
-    "operations control file",
-    "read operating controls",
-    "external stress file",
-    "ad control file",
-    "swmm control file",
+    "Read File",
+    "Geometry Control File",
+    "BC Control File",
+    "ESTRY Control File",
+    "Quadtree Control File",
+    "Event File",
+    "Rainfall Control File",
+    "Operations Control File",   # some models use this explicit form
+    "Operations Control",        # keep for compatibility with existing hints
+    "AD Control File",
+    "Advection Dispersion Control File",
+    "Advection Dispersion Control",
+    "External Stress File",
+    "SWMM Control File",
 }
 
-INPUT_DIRECTIVES: Set[str] = {
-    "soils file",
-    "read soils file",
-    "infiltration file",
-    "losses file",
-    "rainfall file",
-    "rainfall pattern file",
-    "read rainfall",
-    "read rf",
-    "inflow file",
-    "flow hydrograph",
-    "stage hydrograph",
-    "hq file",
-    "zq file",
-    "qt file",
-    "restart file",
-    "initial conditions file",
-    "read materials file",
-    "read table",
-    "read roughness file",
-    "read resistance file",
-    "blockage matrix file",
-    "fews input file",
-}
-
+# Directives that introduce GIS layers (vector/raster containers; may be "file | layer")
 GIS_DIRECTIVES: Set[str] = {
-    "read gis",
-    "read gis z shape",
-    "read gis code",
-    "read gis attribute",
-    "read gis materials",
-    "read gis roughness",
-    "read gis resistance",
-    "read gis source",
-    "read gis boundary",
-    "read gis flow",
-    "read bc",
-    "read bc gis",
-    "read source gis",
+    # TCF-level GIS integration (e.g. 12D / legacy links)
+    "Read GIS 12D Network",
+    "Read GIS 12D Nodes",
+    "Read GIS 12D WLL Points",
+    "Calibration Points MI File",
+
+    # TGC-level core GIS reads
+    "Read GIS",
+    "Read GIS Z Shape",
+    "Read GIS Code",
+    "Read GIS Attribute",
+    "Read GIS Materials",
+    "Read GIS Roughness",
+    "Read GIS Resistance",
+    "Read GIS Source",
+    "Read GIS Boundary",
+    "Read GIS Flow",
+
+    # TBC-level GIS reads
+    "Read BC",
+    "Read BC GIS",
+    "Read Source GIS",
+
+    # ECF-level 1D GIS reads (common names)
+    "Read GIS Network",
+    "Read GIS Nodes",
+    "Read GIS Links",
 }
 
+# Directives that introduce database files (CSV/DBF/SQLite/GPKG containers)
 DATABASE_DIRECTIVES: Set[str] = {
-    "bc database",
-    "read bc database",
-    "spatial database",
-    "read structure database",
-    "read attribute database",
+    "BC Database",
+    "Read BC Database",
+    "Spatial Database",
+    "Read Structure Database",
+    "Read Attribute Database",
 }
 
+# Directives that introduce generic input files (non-control, non-GIS)
+INPUT_DIRECTIVES: Set[str] = {
+    # Soils / losses
+    "Soils File",
+    "Read Soils File",
+    "Infiltration File",
+    "Losses File",
+    "Initial Loss File",
+    "Continuing Loss File",
+
+    # Rainfall (often in TEF/TRFC, but can appear elsewhere)
+    "Rainfall File",
+    "Read Rainfall",
+    "Read RF",
+    "Rainfall Pattern File",
+
+    # Time series / hydrographs / curves
+    "Inflow File",
+    "Flow Hydrograph",
+    "Stage Hydrograph",
+    "HQ File",
+    "ZQ File",
+    "QT File",
+
+    # Tables / materials / roughness (non-GIS)
+    "Read Table",
+    "Read Materials File",
+    "Read Roughness File",
+    "Read Resistance File",
+
+    # Restart / initialisation
+    "Restart File",
+    "Initial Conditions File",
+    "Hot Start File",
+
+    # Misc / external integration
+    "FEWS Input File",
+    "Blockage Matrix File",
+}
+
+# Grid/raster reads (often appear in TGC/TRFC). Treat as GIS-raster or INPUT-raster.
 GRID_DIRECTIVES: Set[str] = {
-    "read grid",
-    "read dem",
-    "read asc",
-    "read tif",
-    "read tiff",
-    "read bil",
-    "read flt",
-    "rainfall grid",
-    "read rainfall grid",
+    "Read Grid",
+    "Read DEM",
+    "Read ASC",
+    "Read TIF",
+    "Read TIFF",
+    "Read BIL",
+    "Read FLT",
+    "Rainfall Grid",
+    "Read Rainfall Grid",
 }
 
+# Directives that MUST NEVER be treated as files (even though they use "==")
 NON_FILE_DIRECTIVES: Set[str] = {
-    "scenario",
-    "event",
-    "else if scenario",
-    "set variable",
-    "define",
-    "if",
-    "else",
-    "end if",
+    "Scenario",
+    "Event",
+    "Else if Scenario",
+    "Set Variable",
+    "Define",
+    "If",
+    "Else",
+    "End If",
 }
+
+# Category map for directive-driven classification
+# Use this in parsing: directive -> "control" | "gis" | "database" | "input" | "grid"
+DIRECTIVE_CATEGORY: Dict[str, str] = {
+    **{k: "control" for k in CONTROL_DIRECTIVES},
+    **{k: "gis" for k in GIS_DIRECTIVES},
+    **{k: "database" for k in DATABASE_DIRECTIVES},
+    **{k: "input" for k in INPUT_DIRECTIVES},
+    **{k: "grid" for k in GRID_DIRECTIVES},
+}
+
+# Known non-file literal RHS values (common flags)
+NON_FILE_LITERALS: Set[str] = {
+    "on", "off", "yes", "no", "true", "false",
+}
+
+# Numeric-ish RHS patterns (used to prevent false file detection like "2.5" or "2.5m")
+NUMERIC_ONLY_RE = re.compile(r"^\s*[-+]?\d*\.?\d+(?:[Ee][-+]?\d+)?\s*$")
+NUMERIC_WITH_UNIT_RE = re.compile(r"^\s*[-+]?\d*\.?\d+(?:[Ee][-+]?\d+)?\s*[A-Za-z]+\s*$")
+
+def _normalise_set(values: Set[str]) -> Set[str]:
+    return {normalize_directive(v) for v in values}
+
+
+# Normalised (case-insensitive) versions for parsing
+CONTROL_DIRECTIVES = _normalise_set(CONTROL_DIRECTIVES)
+GIS_DIRECTIVES = _normalise_set(GIS_DIRECTIVES)
+DATABASE_DIRECTIVES = _normalise_set(DATABASE_DIRECTIVES)
+INPUT_DIRECTIVES = _normalise_set(INPUT_DIRECTIVES)
+GRID_DIRECTIVES = _normalise_set(GRID_DIRECTIVES)
+NON_FILE_DIRECTIVES = _normalise_set(NON_FILE_DIRECTIVES)
+DIRECTIVE_CATEGORY = {normalize_directive(k): v for k, v in DIRECTIVE_CATEGORY.items()}
+NON_FILE_LITERALS = {v.casefold() for v in NON_FILE_LITERALS}
 
 # ---- Regex patterns ----
 

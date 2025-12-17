@@ -98,6 +98,8 @@ class InputScanResult:
     inputs: List[InputRef]
     model_tree: Optional[ModelNode]
     debug_log: List[str] = field(default_factory=list)
+    seen_directives: Set[str] = field(default_factory=set)
+    missing_required_directives: List[str] = field(default_factory=list)
 
 
 # ---- Stage 2: TUFLOW run test ----

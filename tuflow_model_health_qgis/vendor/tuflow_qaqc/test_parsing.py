@@ -25,6 +25,7 @@ def test_scan_filters_noise_and_collects_layers(tmp_path: Path):
     (tmp_path / "inputs").mkdir()
     (tmp_path / "inputs" / "rain.dat").write_text("")
     (tmp_path / "inputs" / "spatial.gpkg").write_text("")
+    (tmp_path / "inputs" / "unusual.abc").write_text("")
 
     control.write_text(
         """
@@ -37,6 +38,7 @@ Geometry Control File == model.tgc
 Rainfall Grid == rasters\\dem.asc
 Read RF == inputs\\rain.dat
 Spatial Database == inputs\\spatial.gpkg
+Read Table == unusual.abc
 """
     )
 
@@ -61,6 +63,9 @@ Spatial Database == inputs\\spatial.gpkg
 
     assert "spatial.gpkg" in by_name
     assert by_name["spatial.gpkg"].category == InputCategory.DATABASE
+
+    assert "unusual.abc" in by_name
+    assert by_name["unusual.abc"].category == InputCategory.INPUT
 
     assert "2.5" not in by_name
 

@@ -25,6 +25,11 @@ from .config import (
     GRID_DIRECTIVES,
     NON_FILE_DIRECTIVES,
     ALL_KNOWN_FILE_EXTS,
+    DIRECTIVE_CATEGORY,
+    NON_FILE_LITERALS,
+    NUMERIC_ONLY_RE,
+    NUMERIC_WITH_UNIT_RE,
+    normalize_directive,
 )
 
 
@@ -59,14 +64,13 @@ def _strip_quotes(text: str) -> str:
     return text.strip().strip('"').strip("'")
 
 
-def _normalise_directive(key: str) -> str:
-    """Lower-case and collapse whitespace in directive keywords for matching."""
+def _file_token_status(text: str, *, allow_unknown_extension: bool = False) -> Tuple[bool, str]:
+    """Validate whether a token should be treated as a file path.
 
-    return " ".join(key.lower().split())
-
-
-def _file_token_status(text: str) -> Tuple[bool, str]:
-    """Validate whether a token should be treated as a file path."""
+    If ``allow_unknown_extension`` is True, tokens that look like plain filenames
+    without a recognised extension or path separator will be accepted so long as
+    they pass the non-file/numeric filters above.
+    """
 
     cleaned = _strip_quotes(_strip_inline_comment(text).strip())
 
@@ -76,11 +80,11 @@ def _file_token_status(text: str) -> Tuple[bool, str]:
     if not cleaned:
         return False, "empty token"
 
-    lower = cleaned.lower()
-    if lower in {"on", "off", "true", "false", "yes", "no"}:
+    lower = cleaned.casefold()
+    if lower in NON_FILE_LITERALS:
         return False, "boolean flag"
 
-    if FLOAT_RE.fullmatch(cleaned):
+    if NUMERIC_ONLY_RE.fullmatch(cleaned):
         return False, "pure number"
 
     if NUMERIC_WITH_UNIT_RE.fullmatch(cleaned):
@@ -93,6 +97,9 @@ def _file_token_status(text: str) -> Tuple[bool, str]:
     has_known_ext = any(cleaned.lower().endswith(ext) for ext in ALL_KNOWN_FILE_EXTS)
 
     if has_path_sep or has_drive or has_known_ext:
+        return True, ""
+
+    if allow_unknown_extension:
         return True, ""
 
     return False, "no recognised path pattern or extension"
@@ -143,15 +150,16 @@ def _tokenise_value(value: str) -> List[Tuple[str, Optional[str]]]:
 def _classify_directive(key_norm: str) -> Optional[InputCategory]:
     """Return the InputCategory for a directive, if recognised."""
 
-    if key_norm in CONTROL_DIRECTIVES:
+    category = DIRECTIVE_CATEGORY.get(key_norm)
+    if category == "control":
         return InputCategory.CONTROL
-    if key_norm in GIS_DIRECTIVES:
+    if category == "gis":
         return InputCategory.GIS
-    if key_norm in DATABASE_DIRECTIVES:
+    if category == "database":
         return InputCategory.DATABASE
-    if key_norm in GRID_DIRECTIVES:
+    if category == "grid":
         return InputCategory.GRID
-    if key_norm in INPUT_DIRECTIVES:
+    if category == "input":
         return InputCategory.INPUT
     return None
 
@@ -247,17 +255,17 @@ def _collect_control_children(
     base_dir = cf.path.parent
 
     for d in cf.directives:
-        key_norm = _normalise_directive(d.keyword)
+        key_norm = normalize_directive(d.keyword)
         if key_norm in NON_FILE_DIRECTIVES:
             continue
-        if key_norm not in CONTROL_DIRECTIVES:
+        if _classify_directive(key_norm) != InputCategory.CONTROL:
             continue
 
         value = substitute_wildcards(d.value, wildcards)
         value_cleaned = _strip_inline_comment(value).strip()
 
         for tok, _ in _tokenise_value(value_cleaned):
-            ok, _reason = _file_token_status(tok)
+            ok, _reason = _file_token_status(tok, allow_unknown_extension=True)
             if not ok:
                 continue
 
@@ -341,6 +349,7 @@ def _scan_inputs_in_control_file(
     *,
     debug: bool = False,
     debug_log: List[str],
+    seen_directives: set[str],
 ) -> List[InputRef]:
     """Scan a single control file for input file references (GIS, CSV, soils, etc.)."""
     inputs: List[InputRef] = []
@@ -374,7 +383,8 @@ def _scan_inputs_in_control_file(
 
         key = m.group("key").strip()
         val_raw = m.group("value").strip()
-        key_norm = _normalise_directive(key)
+        key_norm = normalize_directive(key)
+        seen_directives.add(key_norm)
 
         if key_norm in NON_FILE_DIRECTIVES:
             _log(f"{path}:{i}: directive '{key}' ignored (non-file directive)")
@@ -393,7 +403,7 @@ def _scan_inputs_in_control_file(
         _log(f"{path}:{i}: directive '{key}' -> tokens {token_pairs}")
 
         for tok, layer in token_pairs:
-            ok, reason = _file_token_status(tok)
+            ok, reason = _file_token_status(tok, allow_unknown_extension=True)
             if not ok:
                 ignored_non_files += 1
                 _log(f"{path}:{i}: ignored token '{tok}' (layer={layer}) - {reason}")
@@ -437,6 +447,7 @@ def scan_all_inputs(
     debug_log: List[str] = []
     seen_paths: set[Tuple[Path, InputCategory, Optional[str]]] = set()
     all_inputs: List[InputRef] = []
+    seen_directives: set[str] = set()
 
     for cf_path in control_tree.all_files:
         inputs = _scan_inputs_in_control_file(
@@ -444,6 +455,7 @@ def scan_all_inputs(
             wildcards,
             debug=debug,
             debug_log=debug_log,
+            seen_directives=seen_directives,
         )
         for inp in inputs:
             # avoid duplicates: (path, from_control, line) can be unique;
@@ -456,12 +468,40 @@ def scan_all_inputs(
 
     model_tree = build_model_tree(control_tree, all_inputs)
 
+    required_directives = [
+        "Geometry Control File",
+        "BC Control File",
+        "Start Time",
+        "End Time",
+        "Map Output Interval",
+    ]
+    missing_required = [
+        d for d in required_directives if normalize_directive(d) not in seen_directives
+    ]
+
+    if missing_required:
+        message = (
+            "Missing required TCF directive(s): " + ", ".join(missing_required)
+        )
+        control_tree.issues.append(
+            Issue(
+                id="CT003_REQUIRED_TCF_DIRECTIVES_MISSING",
+                severity=Severity.CRITICAL,
+                category="ControlFiles",
+                message=message,
+                suggestion="Add the missing directives to the TCF before running.",
+                file=tcf_path,
+            )
+        )
+
     return InputScanResult(
         tcf_path=tcf_path,
         control_tree=control_tree,
         inputs=all_inputs,
         model_tree=model_tree,
         debug_log=debug_log,
+        seen_directives=seen_directives,
+        missing_required_directives=missing_required,
     )
 
 
