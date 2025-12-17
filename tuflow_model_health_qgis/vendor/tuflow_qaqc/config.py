@@ -160,7 +160,7 @@ INPUT_DIRECTIVES: Set[str] = {
 
 # Grid/raster reads (often appear in TGC/TRFC). Treat as GIS-raster or INPUT-raster.
 GRID_DIRECTIVES: Set[str] = {
-    "Read Grid",
+    "Read GRID",
     "Read DEM",
     "Read ASC",
     "Read TIF",
