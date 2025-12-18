@@ -124,3 +124,54 @@ def test_read_gis_and_grid_prefix_families(tmp_path: Path):
     assert by_name["z.asc"].category == InputCategory.GRID
     assert by_name["mat.flt"].category == InputCategory.GRID
 
+
+def test_paths_with_spaces_are_preserved(tmp_path: Path):
+    control = tmp_path / "model.tcf"
+
+    geo_dir = tmp_path / "Model Geometry"
+    geo_dir.mkdir()
+    (geo_dir / "Domain Geometry.tgc").write_text("")
+
+    inputs_dir = tmp_path / "inputs" / "Boundary Conditions"
+    inputs_dir.mkdir(parents=True)
+    (inputs_dir / "bc database.csv").write_text("")
+
+    gis_dir = tmp_path / "gis layers"
+    gis_dir.mkdir()
+    (gis_dir / "hydraulics.gpkg").write_text("")
+
+    grid_dir = tmp_path / "grids"
+    grid_dir.mkdir()
+    (grid_dir / "High Res DEM.tif").write_text("")
+
+    control.write_text(
+        "\n".join(
+            [
+                "Geometry Control File == ..\\Model Geometry\\Domain Geometry.tgc",
+                "BC Database == \"inputs\\Boundary Conditions\\bc database.csv\"",
+                "Read GIS == \"gis layers\\hydraulics.gpkg\" | zpts",
+                "Read GRID == grids\\High Res DEM.tif",
+                "Scenario == 2.5m",
+            ]
+        )
+    )
+
+    result = scan_all_inputs(control, wildcards={}, debug=True)
+
+    by_name = {inp.path.name: inp for inp in result.inputs}
+
+    assert "Domain Geometry.tgc" in by_name
+    assert by_name["Domain Geometry.tgc"].category == InputCategory.CONTROL
+
+    assert "bc database.csv" in by_name
+    assert by_name["bc database.csv"].category == InputCategory.DATABASE
+
+    assert "hydraulics.gpkg" in by_name
+    assert by_name["hydraulics.gpkg"].category == InputCategory.GIS
+    assert by_name["hydraulics.gpkg"].layer == "zpts"
+
+    assert "High Res DEM.tif" in by_name
+    assert by_name["High Res DEM.tif"].category == InputCategory.GRID
+
+    assert "2.5m" not in by_name
+
