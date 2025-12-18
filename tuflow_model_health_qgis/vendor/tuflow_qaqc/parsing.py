@@ -74,9 +74,6 @@ def _file_token_status(text: str, *, allow_unknown_extension: bool = False) -> T
 
     cleaned = _strip_quotes(_strip_inline_comment(text).strip())
 
-    if "|" in cleaned:
-        cleaned = cleaned.split("|", maxsplit=1)[0].strip()
-
     if not cleaned:
         return False, "empty token"
 
@@ -112,39 +109,30 @@ def looks_like_file_path(text: str) -> bool:
     return ok
 
 
-def _tokenise_value(value: str) -> List[Tuple[str, Optional[str]]]:
-    """Split a directive value into (path, layer) tuples."""
+def _tokenise_value(
+    value: str, *, category: Optional[InputCategory] = None
+) -> List[Tuple[str, Optional[str]]]:
+    """Extract a directive value into (path, layer) tuples.
 
-    tokens: List[Tuple[str, Optional[str]]] = []
-    raw_tokens = [t for t in re.split(r"[\s,;]+", value) if t]
+    The RHS of a directive is treated as a single file path string. Splitting on
+    whitespace is avoided so that file paths containing spaces are preserved.
+    For GIS directives only, a single ``|`` separator is used to extract the
+    optional layer name.
+    """
 
-    idx = 0
-    while idx < len(raw_tokens):
-        tok = raw_tokens[idx]
-        layer: Optional[str] = None
+    trimmed_value = value.strip()
+    if not trimmed_value:
+        return []
 
-        if "|" in tok and tok != "|":
-            file_part, layer_part = tok.split("|", maxsplit=1)
-            tok = file_part
-            layer = _strip_quotes(layer_part.strip()) or None
-            idx += 1
-        elif idx + 1 < len(raw_tokens) and raw_tokens[idx + 1] == "|":
-            if idx + 2 < len(raw_tokens):
-                layer = _strip_quotes(raw_tokens[idx + 2].strip()) or None
-                idx += 3
-            else:
-                idx += 2
-        elif idx + 1 < len(raw_tokens) and raw_tokens[idx + 1].startswith("|"):
-            layer = _strip_quotes(raw_tokens[idx + 1][1:].strip()) or None
-            idx += 2
-        else:
-            idx += 1
+    layer: Optional[str] = None
+    path_value = trimmed_value
 
-        cleaned = _strip_quotes(tok.strip())
-        if cleaned:
-            tokens.append((cleaned, layer))
+    if category == InputCategory.GIS and "|" in trimmed_value:
+        file_part, _sep, layer_part = trimmed_value.partition("|")
+        path_value = file_part.strip()
+        layer = _strip_quotes(layer_part.strip()) or None
 
-    return tokens
+    return [(_strip_quotes(path_value), layer)]
 
 
 def _classify_directive(key_norm: str) -> Optional[InputCategory]:
@@ -271,7 +259,7 @@ def _collect_control_children(
         value = substitute_wildcards(d.value, wildcards)
         value_cleaned = _strip_inline_comment(value).strip()
 
-        for tok, _ in _tokenise_value(value_cleaned):
+        for tok, _ in _tokenise_value(value_cleaned, category=InputCategory.CONTROL):
             ok, _reason = _file_token_status(tok, allow_unknown_extension=True)
             if not ok:
                 continue
@@ -406,7 +394,7 @@ def _scan_inputs_in_control_file(
         val = substitute_wildcards(val_raw, wildcards)
         value_cleaned = _strip_inline_comment(val).strip()
 
-        token_pairs = _tokenise_value(value_cleaned)
+        token_pairs = _tokenise_value(value_cleaned, category=directive_category)
         _log(f"{path}:{i}: directive '{key}' -> tokens {token_pairs}")
 
         for tok, layer in token_pairs:
