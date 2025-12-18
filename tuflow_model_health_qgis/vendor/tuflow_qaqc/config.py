@@ -12,7 +12,8 @@ from typing import Set, Dict, Literal
 def normalize_directive(s: str) -> str:
     """Canonicalise directive keywords for case-insensitive matching."""
 
-    return " ".join(s.strip().split()).casefold()
+    unitless = re.sub(r"\s*\([^)]*\)\s*$", "", s.strip())
+    return " ".join(unitless.split()).casefold()
 
 # ---- File extensions ----
 
